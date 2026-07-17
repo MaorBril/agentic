@@ -109,7 +109,7 @@ Two things you should understand before routing through agentic:
 
 ## Works with clauder
 
-If [clauder](https://github.com/MaorBril/clauder) is installed, agentic launches sessions through `clauder wrap`, so your instances get persistent memory and can message each other. The two tools are independent; each works without the other.
+If [clauder](https://github.com/MaorBril/clauder) is installed, agentic launches sessions through `clauder wrap --slave`, so your instances get persistent memory, can message each other, and run with clauder's auto-approved tool set for autonomous operation. Launch with `--no-clauder` for a bare claude session. The two tools are independent; each works without the other.
 
 ## Commands
 

@@ -151,7 +151,7 @@ func Run(ctx context.Context, cfg *config.Config, dataDir string, opts Options, 
 func buildChild(opts Options) []string {
 	if !opts.NoClauder {
 		if _, err := exec.LookPath("clauder"); err == nil {
-			args := []string{"clauder", "wrap"}
+			args := []string{"clauder", "wrap", "--slave"}
 			if opts.InstanceName != "" {
 				args = append(args, "--name", opts.InstanceName)
 			}
