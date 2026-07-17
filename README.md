@@ -45,6 +45,8 @@ agentic setup
 
 Or from source: `go install github.com/maorbril/agentic@latest`
 
+To update later, run `agentic update` (or `agentic update --check` to see if one's available without installing it). This updates agentic itself; Claude Code keeps auto-updating on its own regardless.
+
 ## Configure
 
 Everything lives in `~/.agentic/config.yaml`, and everything is editable from the terminal:
@@ -122,6 +124,7 @@ If [clauder](https://github.com/MaorBril/clauder) is installed, agentic launches
 | `agentic config get/set` | any config key |
 | `agentic router run/status` | headless router / who's leader |
 | `agentic doctor` | diagnose the installation |
+| `agentic update [--check]` | update agentic itself to the latest release |
 
 ## Keys
 
