@@ -91,6 +91,9 @@ func (b *Backend) forward(ctx context.Context, call *backend.Call, w http.Respon
 	if !tee || resp.StatusCode >= 400 {
 		buf, _ := io.ReadAll(resp.Body)
 		w.Write(buf)
+		if resp.StatusCode >= 400 {
+			res.ErrMsg = errSnippet(buf)
+		}
 		return res
 	}
 
@@ -131,6 +134,21 @@ func copySSEWithUsageTee(r io.Reader, w http.ResponseWriter) anthropic.Usage {
 		}
 	}
 	return usage
+}
+
+// errSnippet extracts a short error message from an Anthropic error body.
+func errSnippet(body []byte) string {
+	var apiErr anthropic.APIError
+	msg := ""
+	if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Message != "" {
+		msg = apiErr.Error.Message
+	} else {
+		msg = strings.TrimSpace(string(body))
+	}
+	if len(msg) > 200 {
+		msg = msg[:200] + "…"
+	}
+	return msg
 }
 
 func scanUsage(data []byte, usage *anthropic.Usage) {

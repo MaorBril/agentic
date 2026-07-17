@@ -124,5 +124,8 @@ func writeUpstreamError(w http.ResponseWriter, resp *http.Response, provider, mo
 		w.Header().Set("retry-after", ra)
 	}
 	anthropic.WriteError(w, resp.StatusCode, errType, fmt.Sprintf("%s: %s", provider, msg))
-	return backend.Result{Status: resp.StatusCode, ErrType: errType}
+	if len(msg) > 200 {
+		msg = msg[:200] + "…"
+	}
+	return backend.Result{Status: resp.StatusCode, ErrType: errType, ErrMsg: msg}
 }

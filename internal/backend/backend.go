@@ -29,6 +29,7 @@ type Result struct {
 	Usage   anthropic.Usage
 	Status  int
 	ErrType string // empty on success
+	ErrMsg  string // short upstream error message, for the router log
 }
 
 type Backend interface {

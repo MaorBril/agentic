@@ -190,6 +190,10 @@ func (s *Server) recordUsage(r *http.Request, route config.Resolved, alias strin
 		s.log.Warn("usage insert failed", "err", err)
 	}
 	s.gate.Add(ev.Profile, cost)
+	if res.Status >= 400 && res.ErrMsg != "" {
+		s.log.Warn("upstream error",
+			"model", alias, "upstream", route.Model.ID, "status", res.Status, "err", res.ErrMsg)
+	}
 	s.log.Info("request",
 		"model", alias, "upstream", route.Model.ID, "status", res.Status,
 		"in", u.InputTokens, "out", u.OutputTokens,
