@@ -38,7 +38,7 @@ func (b *Backend) forward(ctx context.Context, call *backend.Call, w http.Respon
 	// cache_control, thinking blocks, and unknown future fields survive.
 	if call.Envelope.Model != call.Route.Model.ID {
 		var err error
-		body, err = backend.RewriteModel(call.Raw, call.Route.Model.ID)
+		body, err = rewriteForModel(call.Raw, call.Route.Model.ID)
 		if err != nil {
 			anthropic.WriteError(w, 400, "invalid_request_error", "agentic: could not parse request body: "+err.Error())
 			return backend.Result{Status: 400, ErrType: "invalid_request_error"}

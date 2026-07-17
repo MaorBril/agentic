@@ -141,3 +141,43 @@ func TestUpstreamErrorPassthrough(t *testing.T) {
 		t.Errorf("error body not passed through: %s", rec.Body.String())
 	}
 }
+
+func TestNormalizeForModel(t *testing.T) {
+	legacy := `{"model":"auto","max_tokens":100,"temperature":1,"top_k":40,` +
+		`"thinking":{"type":"enabled","budget_tokens":8000},"messages":[]}`
+
+	// Opus 4.8: enabled -> adaptive, sampling stripped.
+	out, err := rewriteForModel([]byte(legacy), "claude-opus-4-8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	json.Unmarshal(out, &m)
+	th := m["thinking"].(map[string]any)
+	if th["type"] != "adaptive" || th["budget_tokens"] != nil {
+		t.Errorf("opus-4-8 thinking: %v", th)
+	}
+	if _, has := m["temperature"]; has {
+		t.Error("opus-4-8 must not receive temperature")
+	}
+
+	// Fable: thinking stripped entirely.
+	out, _ = rewriteForModel([]byte(legacy), "claude-fable-5")
+	m = map[string]any{}
+	json.Unmarshal(out, &m)
+	if _, has := m["thinking"]; has {
+		t.Error("fable must not receive a thinking field")
+	}
+
+	// Haiku 4.5: legacy config passes through untouched.
+	out, _ = rewriteForModel([]byte(legacy), "claude-haiku-4-5")
+	m = map[string]any{}
+	json.Unmarshal(out, &m)
+	th = m["thinking"].(map[string]any)
+	if th["type"] != "enabled" {
+		t.Errorf("haiku thinking: %v", th)
+	}
+	if _, has := m["temperature"]; !has {
+		t.Error("haiku keeps sampling params")
+	}
+}
