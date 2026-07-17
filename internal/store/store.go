@@ -1,0 +1,181 @@
+// Package store persists sessions and usage events in SQLite.
+package store
+
+import (
+	"database/sql"
+	"fmt"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+type Store struct {
+	db *sql.DB
+}
+
+// Open opens (creating if needed) the agentic database. modernc.org/sqlite
+// uses _pragma=name(value) DSN syntax; WAL lets CLI readers run while the
+// router leader holds the single write connection.
+func Open(path string) (*Store, error) {
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	s := &Store{db: db}
+	if err := s.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// OpenReadOnly opens the database for CLI readers (cost, statusline).
+func OpenReadOnly(path string) (*Store, error) {
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	return &Store{db: db}, nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) migrate() error {
+	_, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS sessions (
+  id         TEXT PRIMARY KEY,
+  profile    TEXT,
+  work_dir   TEXT,
+  started_at INTEGER,
+  ended_at   INTEGER
+);
+CREATE TABLE IF NOT EXISTS usage_events (
+  id                INTEGER PRIMARY KEY,
+  ts                INTEGER NOT NULL,
+  session_id        TEXT,
+  profile           TEXT,
+  provider          TEXT,
+  model             TEXT,
+  model_alias       TEXT,
+  input_tokens      INTEGER,
+  output_tokens     INTEGER,
+  cache_read_tokens INTEGER,
+  cache_write_tokens INTEGER,
+  cost_usd          REAL,
+  priced            INTEGER,
+  request_id        TEXT,
+  status            INTEGER,
+  err_type          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_events(ts);
+CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
+`)
+	return err
+}
+
+type UsageEvent struct {
+	TS               time.Time
+	SessionID        string
+	Profile          string
+	Provider         string
+	Model            string
+	Alias            string
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	CostUSD          float64
+	Priced           bool
+	RequestID        string
+	Status           int
+	ErrType          string
+}
+
+func (s *Store) RecordUsage(e UsageEvent) error {
+	_, err := s.db.Exec(`INSERT INTO usage_events
+(ts, session_id, profile, provider, model, model_alias,
+ input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+ cost_usd, priced, request_id, status, err_type)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		e.TS.Unix(), e.SessionID, e.Profile, e.Provider, e.Model, e.Alias,
+		e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens,
+		e.CostUSD, boolToInt(e.Priced), e.RequestID, e.Status, e.ErrType)
+	return err
+}
+
+func (s *Store) StartSession(id, profile, workDir string, at time.Time) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO sessions (id, profile, work_dir, started_at) VALUES (?,?,?,?)`,
+		id, profile, workDir, at.Unix())
+	return err
+}
+
+func (s *Store) EndSession(id string, at time.Time) error {
+	_, err := s.db.Exec(`UPDATE sessions SET ended_at = ? WHERE id = ?`, at.Unix(), id)
+	return err
+}
+
+// SpendRow is one line of a cost report.
+type SpendRow struct {
+	Key          string // model, profile, or session id depending on grouping
+	InputTokens  int64
+	OutputTokens int64
+	CostUSD      float64
+	Unpriced     int64 // count of events with priced=0
+}
+
+// SpendSince aggregates usage from `since`, grouped by "model", "profile",
+// or "session".
+func (s *Store) SpendSince(since time.Time, groupBy string) ([]SpendRow, error) {
+	col := map[string]string{"model": "model", "profile": "profile", "session": "session_id"}[groupBy]
+	if col == "" {
+		return nil, fmt.Errorf("unknown grouping %q", groupBy)
+	}
+	rows, err := s.db.Query(`SELECT `+col+`,
+  COALESCE(SUM(input_tokens+cache_read_tokens+cache_write_tokens),0),
+  COALESCE(SUM(output_tokens),0),
+  COALESCE(SUM(cost_usd),0),
+  COALESCE(SUM(1-priced),0)
+FROM usage_events WHERE ts >= ? GROUP BY `+col+` ORDER BY SUM(cost_usd) DESC`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SpendRow
+	for rows.Next() {
+		var r SpendRow
+		if err := rows.Scan(&r.Key, &r.InputTokens, &r.OutputTokens, &r.CostUSD, &r.Unpriced); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// TotalSince returns total spend from `since`, optionally filtered by
+// profile ("" = all) or session ("" = all).
+func (s *Store) TotalSince(since time.Time, profile, session string) (float64, error) {
+	q := `SELECT COALESCE(SUM(cost_usd),0) FROM usage_events WHERE ts >= ?`
+	args := []any{since.Unix()}
+	if profile != "" {
+		q += ` AND profile = ?`
+		args = append(args, profile)
+	}
+	if session != "" {
+		q += ` AND session_id = ?`
+		args = append(args, session)
+	}
+	var total float64
+	err := s.db.QueryRow(q, args...).Scan(&total)
+	return total, err
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}

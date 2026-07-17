@@ -1,0 +1,128 @@
+package openaibe
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/maorbril/agentic/internal/anthropic"
+	"github.com/maorbril/agentic/internal/backend"
+	"github.com/maorbril/agentic/internal/openai"
+	"github.com/maorbril/agentic/internal/tokens"
+)
+
+type Backend struct {
+	client *http.Client
+}
+
+func New() *Backend {
+	return &Backend{client: &http.Client{Transport: backend.NewTransport()}}
+}
+
+func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.ResponseWriter) backend.Result {
+	req, err := anthropic.ParseRequest(call.Raw)
+	if err != nil {
+		anthropic.WriteError(w, 400, "invalid_request_error", "agentic: "+err.Error())
+		return backend.Result{Status: 400, ErrType: "invalid_request_error"}
+	}
+	chatReq, err := TranslateRequest(req, call.Route)
+	if err != nil {
+		anthropic.WriteError(w, 400, "invalid_request_error", "agentic translate: "+err.Error())
+		return backend.Result{Status: 400, ErrType: "invalid_request_error"}
+	}
+	body, err := json.Marshal(chatReq)
+	if err != nil {
+		anthropic.WriteError(w, 500, "api_error", "agentic: "+err.Error())
+		return backend.Result{Status: 500, ErrType: "api_error"}
+	}
+
+	u := strings.TrimSuffix(call.Route.Provider.BaseURL, "/") + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		anthropic.WriteError(w, 500, "api_error", "agentic: "+err.Error())
+		return backend.Result{Status: 500, ErrType: "api_error"}
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if key := call.Route.Provider.Key(); key != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+key)
+	}
+
+	resp, err := b.client.Do(httpReq)
+	if err != nil {
+		if ctx.Err() != nil {
+			return backend.Result{Status: 499, ErrType: "client_disconnect"}
+		}
+		anthropic.WriteError(w, 500, "api_error",
+			fmt.Sprintf("%s upstream: %v", call.Route.ProviderName, err))
+		return backend.Result{Status: 502, ErrType: "api_error"}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return writeUpstreamError(w, resp, call.Route.ProviderName, call.Route.Model.ID)
+	}
+
+	if req.Stream {
+		sse := anthropic.NewSSEWriter(w)
+		state := newStreamState(sse, call.Envelope.Model)
+		usage, errType := state.Run(resp.Body)
+		return backend.Result{Status: 200, Usage: usage, ErrType: errType}
+	}
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		anthropic.WriteError(w, 500, "api_error", "agentic: reading upstream body: "+err.Error())
+		return backend.Result{Status: 502, ErrType: "api_error"}
+	}
+	var parsed openai.ChatResponse
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		anthropic.WriteError(w, 500, "api_error", "agentic: upstream body unparseable: "+err.Error())
+		return backend.Result{Status: 502, ErrType: "api_error"}
+	}
+	out, err := TranslateResponse(&parsed, call.Envelope.Model)
+	if err != nil {
+		anthropic.WriteError(w, 500, "api_error", "agentic translate: "+err.Error())
+		return backend.Result{Status: 502, ErrType: "api_error"}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
+	return backend.Result{Status: 200, Usage: out.Usage}
+}
+
+// CountTokens has no OpenAI-dialect equivalent — serve a local estimate.
+func (b *Backend) CountTokens(ctx context.Context, call *backend.Call, w http.ResponseWriter) backend.Result {
+	req, err := anthropic.ParseRequest(call.Raw)
+	if err != nil {
+		anthropic.WriteError(w, 400, "invalid_request_error", "agentic: "+err.Error())
+		return backend.Result{Status: 400, ErrType: "invalid_request_error"}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(anthropic.CountTokensResponse{InputTokens: tokens.Estimate(req)})
+	return backend.Result{Status: 200}
+}
+
+func writeUpstreamError(w http.ResponseWriter, resp *http.Response, provider, model string) backend.Result {
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	msg := strings.TrimSpace(string(raw))
+	var oaiErr struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &oaiErr) == nil && oaiErr.Error.Message != "" {
+		msg = oaiErr.Error.Message
+	}
+	if resp.StatusCode == 404 {
+		msg = fmt.Sprintf("model %q not found on provider %q: %s", model, provider, msg)
+	}
+	errType := anthropic.ErrorTypeForStatus(resp.StatusCode)
+	if ra := resp.Header.Get("retry-after"); ra != "" {
+		w.Header().Set("retry-after", ra)
+	}
+	anthropic.WriteError(w, resp.StatusCode, errType, fmt.Sprintf("%s: %s", provider, msg))
+	return backend.Result{Status: resp.StatusCode, ErrType: errType}
+}
