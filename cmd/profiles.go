@@ -3,12 +3,15 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/maorbril/agentic/internal/config"
+	"github.com/maorbril/agentic/internal/store"
 	"gopkg.in/yaml.v3"
 )
 
@@ -81,6 +84,71 @@ var budgetCmd = &cobra.Command{
 	Short: "Manage spend budgets",
 }
 
+var budgetShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Show budget caps and spend against them",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, dataDir, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		st, err := store.OpenReadOnly(filepath.Join(dataDir, "agentic.db"))
+		if err != nil {
+			return fmt.Errorf("no usage recorded yet (%v)", err)
+		}
+		defer st.Close()
+
+		printBudget := func(label string, b *config.Budget, profile string) {
+			if b == nil {
+				return
+			}
+			now := time.Now()
+			dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+			weekStart := dayStart.AddDate(0, 0, -((int(now.Weekday())+6)%7))
+			monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+			stop := "warn only"
+			if b.HardStop == nil || *b.HardStop {
+				stop = "hard stop"
+			}
+			warnAt := b.WarnAt
+			if warnAt == 0 {
+				warnAt = 0.8
+			}
+			fmt.Printf("%s  (%s, warn at %.0f%%)\n", label, stop, warnAt*100)
+			for _, w := range []struct {
+				name  string
+				cap   float64
+				since time.Time
+			}{
+				{"daily", b.Daily, dayStart},
+				{"weekly", b.Weekly, weekStart},
+				{"monthly", b.Monthly, monthStart},
+			} {
+				if w.cap <= 0 {
+					continue
+				}
+				spent, _ := st.TotalSince(w.since, profile, "")
+				frac := spent / w.cap
+				fmt.Printf("  %-8s $%.2f / $%.2f  [%s] %.0f%%\n",
+					w.name, spent, w.cap, bar(frac, 12), frac*100)
+			}
+		}
+
+		if cfg.Budgets == nil {
+			fmt.Println("No global budget set. Set one with: agentic budget set --daily 25 --monthly 400")
+		} else {
+			printBudget("Global", cfg.Budgets, "")
+		}
+		for _, name := range sortedProfileNames(cfg) {
+			if p := cfg.Profiles[name]; p.Budget != nil {
+				fmt.Println()
+				printBudget("Profile "+name, p.Budget, name)
+			}
+		}
+		return nil
+	},
+}
+
 var budgetSetCmd = &cobra.Command{
 	Use:   "set",
 	Short: "Set budget caps (global, or per profile with --profile)",
@@ -124,6 +192,16 @@ func init() {
 	budgetSetCmd.Flags().Float64("monthly", 0, "monthly cap in USD")
 	budgetSetCmd.Flags().Float64("warn_at", 0, "warn threshold as a fraction (default 0.8)")
 	budgetSetCmd.Flags().Bool("hard-stop", true, "block requests when over cap (false = warn only)")
-	budgetCmd.AddCommand(budgetSetCmd)
+	budgetCmd.AddCommand(budgetSetCmd, budgetShowCmd)
 	profilesCmd.AddCommand(profilesListCmd, profilesShowCmd)
+}
+
+// sortedProfileNames returns profile names in stable order for display.
+func sortedProfileNames(cfg *config.Config) []string {
+	names := make([]string, 0, len(cfg.Profiles))
+	for n := range cfg.Profiles {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }

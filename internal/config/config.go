@@ -191,12 +191,12 @@ func (c *Config) Validate() error {
 			if alias == "" {
 				continue
 			}
-			if _, ok := c.Models[alias]; !ok {
+			if !c.isModelRef(alias) {
 				return fmt.Errorf("config: profile %q %s references unknown model alias %q", name, what, alias)
 			}
 		}
 		for tier, alias := range prof.Tiers {
-			if _, ok := c.Models[alias]; !ok {
+			if !c.isModelRef(alias) {
 				return fmt.Errorf("config: profile %q tier %q references unknown model alias %q", name, tier, alias)
 			}
 		}
@@ -228,6 +228,17 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// isModelRef reports whether name is a usable main-model reference: either a
+// concrete model alias or a dynamic routing rule (e.g. "auto"). Profiles and
+// tiers accept both so `model: auto` is valid config, not a validation error.
+func (c *Config) isModelRef(name string) bool {
+	if _, ok := c.Models[name]; ok {
+		return true
+	}
+	_, ok := c.Routing[name]
+	return ok
 }
 
 // Resolved is a model alias resolved to its provider.
