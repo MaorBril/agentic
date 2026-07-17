@@ -1,6 +1,7 @@
 package router
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -112,6 +113,66 @@ func TestOpenAIStreamThroughRouter(t *testing.T) {
 	}
 	if rows[0].Key != "sess-test" || rows[0].InputTokens != 11 || rows[0].OutputTokens != 3 {
 		t.Errorf("usage row: %+v", rows[0])
+	}
+}
+
+// TestAutoRouteEndToEnd exercises dynamic routing through the full server:
+// the classifier call and the routed call both hit the fake upstream.
+func TestAutoRouteEndToEnd(t *testing.T) {
+	var seenModels []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model string `json:"model"`
+		}
+		json.Unmarshal(body, &req)
+		seenModels = append(seenModels, req.Model)
+		w.Header().Set("Content-Type", "application/json")
+		if req.Model == "classifier-upstream" {
+			fmt.Fprint(w, `{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"deep"},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":1}}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":"m","choices":[{"index":0,"message":{"role":"assistant","content":"planned"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`)
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Providers: map[string]config.Provider{
+			"fake": {Type: config.ProviderOpenAI, BaseURL: upstream.URL},
+		},
+		Models: map[string]config.Model{
+			"cheap": {Provider: "fake", ID: "classifier-upstream"},
+			"big":   {Provider: "fake", ID: "deep-upstream"},
+			"small": {Provider: "fake", ID: "light-upstream"},
+		},
+		Routing: map[string]config.RouteRule{
+			"auto": {Classifier: "cheap", Default: "light",
+				Tiers: map[string]string{"deep": "big", "light": "small"}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "agentic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := NewServer(cfg, testToken, dir, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, respBody := post(t, ts.URL+"/v1/messages", testToken,
+		`{"model":"auto","max_tokens":50,"messages":[{"role":"user","content":"architect the whole system"}]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, respBody)
+	}
+	if len(seenModels) != 2 || seenModels[0] != "classifier-upstream" || seenModels[1] != "deep-upstream" {
+		t.Errorf("upstream saw %v, want [classifier-upstream deep-upstream]", seenModels)
+	}
+	if !strings.Contains(respBody, `"model":"auto"`) {
+		t.Errorf("alias not echoed: %s", respBody)
 	}
 }
 

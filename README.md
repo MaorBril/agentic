@@ -69,6 +69,25 @@ profiles:
   subscription: {passthrough: true}   # plain claude, subscription billing, no tracking
 ```
 
+## Dynamic routing
+
+Instead of picking models by hand, let a cheap LLM triage every task:
+
+```bash
+agentic routing set auto --classifier haiku \
+    --deep opus --standard sonnet --light qwen
+```
+
+`auto` now behaves like a model (`/model auto`, or `profiles: {model: auto}`). On each new user turn, the classifier reads the request and assigns a tier — planning and hard debugging go `deep`, ordinary coding goes `standard`, mechanical edits and verification go `light`. The decision sticks for the rest of the turn (tool results don't re-trigger it), so a task never flips models mid-flight. Classification failures fall back to `--default` (standard), and every decision is logged:
+
+```
+$ grep autoroute ~/.agentic/router.log
+... alias=auto tier=deep model=opus
+... alias=auto tier=light model=qwen
+```
+
+`agentic cost --by model` then shows how spend actually distributed across tiers. Each classification costs one tiny request to the classifier model (~$0.0005 with haiku).
+
 ## Budgets
 
 Daily, weekly, and monthly caps — global and per profile. When a cap is hit, the router refuses the *next* request with a clear message that shows up right in the Claude Code TUI; in-flight responses are never cut. Warnings surface in the statusline (`agentic setup` registers it), which shows live session and daily spend:

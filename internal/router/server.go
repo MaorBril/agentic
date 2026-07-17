@@ -32,6 +32,7 @@ type Server struct {
 	anth    *anthropicbe.Backend
 	oai     *openaibe.Backend
 	gate    *budget.Gate
+	auto    *autoRouter
 	log     *slog.Logger
 }
 
@@ -43,6 +44,7 @@ func NewServer(cfg *config.Config, token, dataDir string, st *store.Store, logge
 	s.cfg.Store(cfg)
 	s.pricing.Store(pricing.Load(dataDir, cfg))
 	s.gate = budget.NewGate(cfg, st, logger)
+	s.auto = &autoRouter{classify: s.classifyViaBackend, cache: map[string]decision{}}
 	return s
 }
 
@@ -113,7 +115,13 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 			return
 		}
 		cfg := s.cfg.Load()
-		route, err := cfg.Resolve(env.Model)
+		resolveAlias := env.Model
+		if rule, ok := cfg.Routing[env.Model]; ok {
+			chosen, tier := s.auto.route(r.Context(), rule, cfg, raw, r.Header.Get("X-Agentic-Session"))
+			s.log.Info("autoroute", "alias", env.Model, "tier", tier, "model", chosen)
+			resolveAlias = chosen
+		}
+		route, err := cfg.Resolve(resolveAlias)
 		if err != nil {
 			anthropic.WriteError(w, 404, "not_found_error", "agentic: "+err.Error()+" (see ~/.agentic/config.yaml)")
 			return

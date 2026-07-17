@@ -18,14 +18,24 @@ const (
 )
 
 type Config struct {
-	Version        int                 `yaml:"version"`
-	DefaultProfile string              `yaml:"default_profile"`
-	Router         Router              `yaml:"router"`
-	Providers      map[string]Provider `yaml:"providers"`
-	Models         map[string]Model    `yaml:"models"`
-	Profiles       map[string]Profile  `yaml:"profiles"`
-	Budgets        *Budget             `yaml:"budgets"`
-	Pricing        map[string]Price    `yaml:"pricing"`
+	Version        int                  `yaml:"version"`
+	DefaultProfile string               `yaml:"default_profile"`
+	Router         Router               `yaml:"router"`
+	Providers      map[string]Provider  `yaml:"providers"`
+	Models         map[string]Model     `yaml:"models"`
+	Routing        map[string]RouteRule `yaml:"routing"`
+	Profiles       map[string]Profile   `yaml:"profiles"`
+	Budgets        *Budget              `yaml:"budgets"`
+	Pricing        map[string]Price     `yaml:"pricing"`
+}
+
+// RouteRule is a dynamic alias: a cheap classifier model assesses each new
+// user turn and picks a tier, so e.g. `model: auto` plans on a frontier
+// model and executes on open weights without manual switching.
+type RouteRule struct {
+	Classifier string            `yaml:"classifier"` // model alias used to classify
+	Default    string            `yaml:"default"`    // tier when classification fails ("" = standard)
+	Tiers      map[string]string `yaml:"tiers"`      // deep/standard/light -> model alias
 }
 
 type Router struct {
@@ -194,6 +204,27 @@ func (c *Config) Validate() error {
 	if c.DefaultProfile != "" {
 		if _, ok := c.Profiles[c.DefaultProfile]; !ok {
 			return fmt.Errorf("config: default_profile %q not defined", c.DefaultProfile)
+		}
+	}
+	for name, r := range c.Routing {
+		if _, clash := c.Models[name]; clash {
+			return fmt.Errorf("config: routing %q collides with a model alias", name)
+		}
+		if _, ok := c.Models[r.Classifier]; !ok {
+			return fmt.Errorf("config: routing %q classifier references unknown model alias %q", name, r.Classifier)
+		}
+		if len(r.Tiers) == 0 {
+			return fmt.Errorf("config: routing %q has no tiers", name)
+		}
+		for tier, alias := range r.Tiers {
+			if _, ok := c.Models[alias]; !ok {
+				return fmt.Errorf("config: routing %q tier %q references unknown model alias %q", name, tier, alias)
+			}
+		}
+		if r.Default != "" {
+			if _, ok := r.Tiers[r.Default]; !ok {
+				return fmt.Errorf("config: routing %q default %q is not a tier", name, r.Default)
+			}
 		}
 	}
 	return nil
