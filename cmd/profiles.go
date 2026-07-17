@@ -104,7 +104,7 @@ var budgetShowCmd = &cobra.Command{
 			}
 			now := time.Now()
 			dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-			weekStart := dayStart.AddDate(0, 0, -((int(now.Weekday())+6)%7))
+			weekStart := dayStart.AddDate(0, 0, -((int(now.Weekday()) + 6) % 7))
 			monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 			stop := "warn only"
 			if b.HardStop == nil || *b.HardStop {
