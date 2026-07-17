@@ -181,3 +181,49 @@ func TestNormalizeForModel(t *testing.T) {
 		t.Error("haiku keeps sampling params")
 	}
 }
+
+func TestNormalizeEffortAndSystemMessages(t *testing.T) {
+	body := `{"model":"auto","max_tokens":100,
+	  "output_config":{"effort":"high"},
+	  "messages":[
+	    {"role":"user","content":"do the thing"},
+	    {"role":"system","content":"Terse mode enabled."},
+	    {"role":"assistant","content":"ok"}
+	  ]}`
+
+	// Haiku 4.5: effort stripped, system message folded into the user turn.
+	out, err := rewriteForModel([]byte(body), "claude-haiku-4-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	json.Unmarshal(out, &m)
+	if _, has := m["output_config"]; has {
+		t.Error("haiku must not receive output_config.effort")
+	}
+	msgs := m["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("system message not folded: %d messages", len(msgs))
+	}
+	user := msgs[0].(map[string]any)
+	blocks := user["content"].([]any)
+	last := blocks[len(blocks)-1].(map[string]any)
+	if !strings.Contains(last["text"].(string), "<system-reminder>") ||
+		!strings.Contains(last["text"].(string), "Terse mode enabled.") {
+		t.Errorf("folded block: %v", last)
+	}
+	if msgs[1].(map[string]any)["role"] != "assistant" {
+		t.Error("alternation broken")
+	}
+
+	// Opus 4.8: both preserved (supports effort and mid-conv system).
+	out, _ = rewriteForModel([]byte(body), "claude-opus-4-8")
+	m = map[string]any{}
+	json.Unmarshal(out, &m)
+	if _, has := m["output_config"]; !has {
+		t.Error("opus-4-8 keeps output_config")
+	}
+	if len(m["messages"].([]any)) != 3 {
+		t.Error("opus-4-8 keeps the system message")
+	}
+}
