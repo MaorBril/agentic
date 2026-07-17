@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/maorbril/agentic/internal/clauder"
 	"github.com/maorbril/agentic/internal/router"
 	"github.com/maorbril/agentic/internal/selfupdate"
 )
@@ -60,7 +61,18 @@ This updates agentic only — Claude Code updates itself independently.`,
 			return err
 		}
 
-		fmt.Printf("Updated to %s. Restart any running `agentic` sessions to pick it up.\n", rel.TagName)
+		fmt.Printf("Updated to %s.\n", rel.TagName)
+
+		// Running sessions host the router in-process; the new binary only
+		// takes over when they restart. Tell them via clauder.
+		msg := fmt.Sprintf("[agentic] agentic was updated to %s. If this session was launched via `agentic`, "+
+			"its router is still running the old version — please tell the user this session should be "+
+			"restarted (exit and re-run `agentic`) at a convenient moment to pick up the update.", rel.TagName)
+		if n := clauder.Broadcast(msg); n > 0 {
+			fmt.Printf("Notified %d running instance(s) via clauder to restart when convenient.\n", n)
+		} else {
+			fmt.Println("Restart any running `agentic` sessions to pick it up.")
+		}
 		return nil
 	},
 }
