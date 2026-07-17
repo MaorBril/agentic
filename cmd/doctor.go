@@ -48,9 +48,9 @@ var doctorCmd = &cobra.Command{
 			if p.APIKeyEnv == "" || p.APIKey != "" {
 				continue
 			}
-			check(os.Getenv(p.APIKeyEnv) != "",
-				fmt.Sprintf("provider %s: %s set", name, p.APIKeyEnv),
-				fmt.Sprintf("provider %s: %s is not set", name, p.APIKeyEnv))
+			check(p.Key() != "",
+				fmt.Sprintf("provider %s: %s available", name, p.APIKeyEnv),
+				fmt.Sprintf("provider %s: %s not in the environment or ~/.agentic/env", name, p.APIKeyEnv))
 		}
 
 		st, err := store.Open(filepath.Join(dataDir, "agentic.db"))

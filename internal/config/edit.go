@@ -76,10 +76,31 @@ func mapDelete(m *yaml.Node, key string) bool {
 	return false
 }
 
+// splitPath splits a dot path, honoring double-quoted segments so keys
+// containing dots are addressable: pricing."gpt-5.5".input
+func splitPath(dotPath string) []string {
+	var parts []string
+	var cur strings.Builder
+	inQuote := false
+	for _, r := range dotPath {
+		switch {
+		case r == '"':
+			inQuote = !inQuote
+		case r == '.' && !inQuote:
+			parts = append(parts, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	parts = append(parts, cur.String())
+	return parts
+}
+
 // Get returns the scalar (or re-marshaled subtree) at a dot path.
 func (d *Doc) Get(dotPath string) (string, error) {
 	node := d.top()
-	for _, part := range strings.Split(dotPath, ".") {
+	for _, part := range splitPath(dotPath) {
 		if node.Kind != yaml.MappingNode {
 			return "", fmt.Errorf("%s: not a mapping", dotPath)
 		}
@@ -98,7 +119,7 @@ func (d *Doc) Get(dotPath string) (string, error) {
 // Set writes a scalar at a dot path, creating intermediate mappings and
 // inferring the YAML type (int/float/bool/string).
 func (d *Doc) Set(dotPath, value string) error {
-	parts := strings.Split(dotPath, ".")
+	parts := splitPath(dotPath)
 	node := d.top()
 	for _, part := range parts[:len(parts)-1] {
 		if node.Kind != yaml.MappingNode {

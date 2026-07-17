@@ -42,16 +42,21 @@ type Provider struct {
 	MaxTokensParam string `yaml:"max_tokens_param"`
 }
 
-// Key resolves the provider's API key. An empty result is valid for
-// unauthenticated local endpoints.
+// Key resolves the provider's API key: config literal, then process
+// environment, then ~/.agentic/env (so keys don't depend on which shell
+// launched the router leader). Empty is valid for unauthenticated local
+// endpoints.
 func (p Provider) Key() string {
 	if p.APIKey != "" {
 		return p.APIKey
 	}
-	if p.APIKeyEnv != "" {
-		return os.Getenv(p.APIKeyEnv)
+	if p.APIKeyEnv == "" {
+		return ""
 	}
-	return ""
+	if v := os.Getenv(p.APIKeyEnv); v != "" {
+		return v
+	}
+	return EnvFileLookup(p.APIKeyEnv)
 }
 
 type Model struct {

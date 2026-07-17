@@ -131,11 +131,24 @@ var setupCmd = &cobra.Command{
 		}
 		fmt.Println("✓ router token ready")
 
-		if os.Getenv("ANTHROPIC_API_KEY") == "" {
-			fmt.Println("⚠ ANTHROPIC_API_KEY is not set — the router bills via API keys, not your Claude subscription.")
-			fmt.Println("  Set it in your shell profile, or use `agentic -p subscription` for normal subscription claude.")
+		envPath := filepath.Join(dataDir, "env")
+		if _, err := os.Stat(envPath); os.IsNotExist(err) {
+			template := "# agentic provider keys (0600). The router reads this file directly,\n" +
+				"# so keys work no matter which shell launches a session.\n" +
+				"# Process environment variables take precedence when set.\n" +
+				"ANTHROPIC_API_KEY=\n" +
+				"OPENAI_API_KEY=\n" +
+				"XAI_API_KEY=\n"
+			if err := os.WriteFile(envPath, []byte(template), 0o600); err == nil {
+				fmt.Printf("✓ created %s — put provider keys there\n", envPath)
+			}
+		}
+		anthCfg := config.Provider{APIKeyEnv: "ANTHROPIC_API_KEY"}
+		if anthCfg.Key() == "" {
+			fmt.Println("⚠ ANTHROPIC_API_KEY not found — the router bills via API keys, not your Claude subscription.")
+			fmt.Printf("  Put it in %s (or export it), or use `agentic -p subscription` for normal subscription claude.\n", envPath)
 		} else {
-			fmt.Println("✓ ANTHROPIC_API_KEY set")
+			fmt.Println("✓ ANTHROPIC_API_KEY available")
 		}
 
 		if err := registerStatusline(); err != nil {

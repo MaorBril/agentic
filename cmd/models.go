@@ -51,8 +51,8 @@ var modelsListCmd = &cobra.Command{
 				priceIn, priceOut = fmt.Sprintf("%.2f", pr.Input), fmt.Sprintf("%.2f", pr.Output)
 			}
 			key := "✓"
-			if p.APIKeyEnv != "" && os.Getenv(p.APIKeyEnv) == "" && p.APIKey == "" {
-				key = "✗ (" + p.APIKeyEnv + " unset)"
+			if p.APIKeyEnv != "" && p.Key() == "" {
+				key = "✗ (" + p.APIKeyEnv + " unavailable)"
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", a, m.Provider, m.ID, priceIn, priceOut, key)
 		}

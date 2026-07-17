@@ -46,8 +46,8 @@ var providersListCmd = &cobra.Command{
 				key = "✓ (literal)"
 			case p.APIKeyEnv == "":
 				key = "· (no auth)"
-			case os.Getenv(p.APIKeyEnv) == "":
-				key = "✗ (" + p.APIKeyEnv + " unset)"
+			case p.Key() == "":
+				key = "✗ (" + p.APIKeyEnv + " unavailable)"
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", n, p.Type, p.BaseURL, key)
 		}

@@ -104,9 +104,13 @@ If [clauder](https://github.com/MaorBril/clauder) is installed, agentic launches
 | `agentic router run/status` | headless router / who's leader |
 | `agentic doctor` | diagnose the installation |
 
+## Keys
+
+Provider keys are referenced by environment variable name. They resolve in order: process environment → `~/.agentic/env` (a `KEY=value` file, mode 0600, created by `setup`). Put keys in `~/.agentic/env` — the router reads it directly, so sessions work no matter which shell launched them, and the config file never holds a secret.
+
 ## Security notes
 
-The router binds `127.0.0.1` only and requires a per-install token (created by `setup`, mode 0600), so other local processes can't spend on your keys. Provider keys are referenced by environment variable name; the config file never needs to hold a secret.
+The router binds `127.0.0.1` only and requires a per-install token (created by `setup`, mode 0600), so other local processes can't spend on your keys.
 
 ## License
 

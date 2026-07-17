@@ -81,3 +81,14 @@ modles:
 		}
 	}
 }
+
+func TestSplitPathQuotedSegments(t *testing.T) {
+	got := splitPath(`pricing."gpt-5.5".input`)
+	if len(got) != 3 || got[0] != "pricing" || got[1] != "gpt-5.5" || got[2] != "input" {
+		t.Errorf("splitPath = %v", got)
+	}
+	got = splitPath("budgets.daily")
+	if len(got) != 2 || got[1] != "daily" {
+		t.Errorf("splitPath = %v", got)
+	}
+}
