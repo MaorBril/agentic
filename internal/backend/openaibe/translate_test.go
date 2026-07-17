@@ -108,6 +108,22 @@ func TestRequestTranslation(t *testing.T) {
 	}
 }
 
+func TestMidConversationSystemMessage(t *testing.T) {
+	// Claude Code sends {"role":"system"} entries inside messages[].
+	body := `{"model":"gpt","max_tokens":10,"messages":[
+	  {"role":"user","content":"hi"},
+	  {"role":"system","content":"Terse mode enabled."}
+	]}`
+	out, err := TranslateRequest(parseReq(t, body), route("", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := out.Messages[len(out.Messages)-1]
+	if last.Role != "system" || last.Content != "Terse mode enabled." {
+		t.Errorf("mid-conversation system: %+v", last)
+	}
+}
+
 func TestReasoningModes(t *testing.T) {
 	body := `{"model":"gpt","max_tokens":100,"temperature":0.5,
 	  "thinking":{"type":"enabled","budget_tokens":16000},

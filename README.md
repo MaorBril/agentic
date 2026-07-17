@@ -52,7 +52,7 @@ Everything lives in `~/.agentic/config.yaml`, and everything is editable from th
 ```bash
 agentic providers add openai --type openai --base-url https://api.openai.com/v1 \
     --key-env OPENAI_API_KEY --max-tokens-param max_completion_tokens
-agentic models add gpt --provider openai --id gpt-5.2 --reasoning effort
+agentic models add gpt --provider openai --id gpt-5.2 --reasoning effort --max-output 16384
 agentic models test gpt          # 1-token probe: did I configure it right?
 agentic budget set --daily 25
 ```
@@ -84,7 +84,7 @@ main · sonnet · sess $0.84 · day $4.31/$25 [██░░░░]
 Two things you should understand before routing through agentic:
 
 - **Billing.** Traffic through the router is billed to **API keys**, not your Claude Pro/Max subscription. OAuth credentials are never proxied. For subscription billing, use a `passthrough: true` profile — normal claude, no tracking.
-- **Fidelity.** Non-Anthropic models work through translation, but Claude Code's prompts and tool patterns are tuned for Claude, so expect them to be clunkier in the main loop. They shine as cheap workhorses for background tasks and subagents. Specific gaps: no prompt caching on OpenAI-dialect backends (provider-side implicit caching still shows up as cache reads), thinking blocks are display-only, Anthropic server tools (web search, code execution) are unavailable on translated models, `top_k` is dropped, stop sequences truncate to four, and token counting for translated models is a deliberate ~15% overestimate so auto-compact fires early instead of overflowing context.
+- **Fidelity.** Non-Anthropic models work through translation, but Claude Code's prompts and tool patterns are tuned for Claude, so expect them to be clunkier in the main loop. They shine as cheap workhorses for background tasks and subagents. Specific gaps: no prompt caching on OpenAI-dialect backends (provider-side implicit caching still shows up as cache reads), thinking blocks are display-only, Anthropic server tools (web search, code execution) are unavailable on translated models, `top_k` is dropped, stop sequences truncate to four, and token counting for translated models is a deliberate ~15% overestimate so auto-compact fires early instead of overflowing context. Set `max_output` on models whose output cap is below what Claude Code requests (it asks for 32K).
 
 ## Works with clauder
 

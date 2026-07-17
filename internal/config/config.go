@@ -61,6 +61,9 @@ type Model struct {
 	// budget_tokens to reasoning_effort), "passive" (model always
 	// reasons; parse reasoning_content).
 	Reasoning string `yaml:"reasoning"`
+	// MaxOutput clamps requested max_tokens to the model's output cap
+	// (Claude Code asks for 32K+; many models cap lower).
+	MaxOutput int    `yaml:"max_output"`
 	Pricing   *Price `yaml:"pricing"`
 }
 

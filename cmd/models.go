@@ -64,6 +64,7 @@ var (
 	modelProvider  string
 	modelID        string
 	modelReasoning string
+	modelMaxOutput int
 )
 
 var modelsAddCmd = &cobra.Command{
@@ -80,6 +81,9 @@ var modelsAddCmd = &cobra.Command{
 		snippet := fmt.Sprintf("provider: %s\nid: %s\n", modelProvider, yamlQuote(modelID))
 		if modelReasoning != "" {
 			snippet += "reasoning: " + modelReasoning + "\n"
+		}
+		if modelMaxOutput > 0 {
+			snippet += fmt.Sprintf("max_output: %d\n", modelMaxOutput)
 		}
 		return editConfig(func(doc *config.Doc) error {
 			return doc.SetSubtree("models", args[0], snippet)
@@ -219,5 +223,6 @@ func init() {
 	modelsAddCmd.Flags().StringVar(&modelProvider, "provider", "", "provider name from config")
 	modelsAddCmd.Flags().StringVar(&modelID, "id", "", "upstream model id")
 	modelsAddCmd.Flags().StringVar(&modelReasoning, "reasoning", "", "none | effort | passive")
+	modelsAddCmd.Flags().IntVar(&modelMaxOutput, "max-output", 0, "clamp max_tokens to this output cap")
 	modelsCmd.AddCommand(modelsListCmd, modelsAddCmd, modelsRemoveCmd, modelsTestCmd, modelsUpdatePricesCmd)
 }

@@ -62,12 +62,16 @@ func TranslateRequest(req *anthropic.MessagesRequest, route config.Resolved) (*o
 		}
 	}
 
+	maxTokens := req.MaxTokens
+	if cap := route.Model.MaxOutput; cap > 0 && maxTokens > cap {
+		maxTokens = cap
+	}
 	// max_tokens parameter name is provider-specific (o-series/GPT-5 use
 	// max_completion_tokens).
 	if route.Provider.MaxTokensParam == "max_completion_tokens" {
-		out.MaxCompletionTokens = req.MaxTokens
+		out.MaxCompletionTokens = maxTokens
 	} else {
-		out.MaxTokens = req.MaxTokens
+		out.MaxTokens = maxTokens
 	}
 
 	reasoning := route.Model.Reasoning
@@ -95,6 +99,23 @@ func TranslateRequest(req *anthropic.MessagesRequest, route config.Resolved) (*o
 // remaining text/images become a trailing user message.
 func translateMessage(msg anthropic.Message) ([]openai.ChatMessage, error) {
 	switch msg.Role {
+	case "system":
+		// Claude Code sends mid-conversation system messages (an
+		// Anthropic API feature); OpenAI accepts system role anywhere.
+		text := ""
+		for _, b := range msg.Content {
+			if b.Type == "text" {
+				if text != "" {
+					text += "\n"
+				}
+				text += b.Text
+			}
+		}
+		if text == "" {
+			return nil, nil
+		}
+		return []openai.ChatMessage{{Role: "system", Content: text}}, nil
+
 	case "assistant":
 		out := openai.ChatMessage{Role: "assistant"}
 		text := ""
