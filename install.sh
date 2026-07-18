@@ -17,6 +17,40 @@ case "$os" in
   *) echo "unsupported OS: $os (use install.ps1 on Windows)" >&2; exit 1 ;;
 esac
 
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl is required but not found." >&2
+  case "$os" in
+    darwin) echo "Install it with: brew install curl" >&2 ;;
+    linux)  echo "Install it with your package manager, e.g.: sudo apt install curl" >&2 ;;
+  esac
+  exit 1
+fi
+
+# prompt_install checks whether $1 is on PATH; if missing, offers to install
+# it by piping the installer at $3 into $4 (sh or bash — match what the
+# tool's own docs specify). Reads the y/N answer from /dev/tty since stdin
+# is usually the curl|sh pipe running this very script.
+prompt_install() {
+  bin="$1"; label="$2"; url="$3"; shell="$4"
+  if command -v "$bin" >/dev/null 2>&1; then
+    echo "✓ $label found"
+    return 0
+  fi
+  echo "· $label not found"
+  if [ -r /dev/tty ]; then
+    printf "Install now via: %s ? [y/N] " "$url"
+    # /dev/tty can fail to open even when -r reports it readable (e.g. no
+    # controlling terminal in some CI/sandbox setups) — don't let `set -e`
+    # abort the whole install over a declined prompt.
+    reply=""
+    read -r reply < /dev/tty 2>/dev/null || true
+    case "$reply" in
+      y|Y|yes|Yes) curl -fsSL "$url" | "$shell"; return $? ;;
+    esac
+  fi
+  echo "  Install later with: curl -fsSL $url | $shell"
+}
+
 echo "Fetching latest release..."
 tag=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
   | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
@@ -37,4 +71,8 @@ case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) echo "NOTE: $INSTALL_DIR is not on your PATH — add it to your shell profile." ;;
 esac
+
+prompt_install claude "claude CLI" https://claude.ai/install.sh bash
+prompt_install clauder clauder https://raw.githubusercontent.com/MaorBril/clauder/main/install.sh sh
+
 echo "Next: agentic setup"

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -30,8 +29,9 @@ var doctorCmd = &cobra.Command{
 			}
 		}
 
-		_, err := exec.LookPath("claude")
-		check(err == nil, "claude binary found", "claude binary not found — install Claude Code")
+		if !ensureClaude() {
+			fail++
+		}
 
 		cfg, cfgErr := config.Load()
 		if errors.Is(cfgErr, os.ErrNotExist) {
@@ -72,11 +72,7 @@ var doctorCmd = &cobra.Command{
 			fmt.Println("· no router running (starts automatically with the next session)")
 		}
 
-		if _, err := exec.LookPath("clauder"); err == nil {
-			fmt.Println("✓ clauder installed (sessions get cross-instance messaging + memory)")
-		} else {
-			fmt.Println("· clauder not installed (optional)")
-		}
+		ensureClauder()
 
 		home, _ := os.UserHomeDir()
 		if data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json")); err == nil {

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -107,11 +106,7 @@ var setupCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if _, err := exec.LookPath("claude"); err != nil {
-			fmt.Println("⚠ claude binary not found — install Claude Code first: https://claude.com/claude-code")
-		} else {
-			fmt.Println("✓ claude binary found")
-		}
+		ensureClaude()
 
 		path, _ := config.Path()
 		if _, err := os.Stat(path); err == nil {
@@ -155,10 +150,8 @@ var setupCmd = &cobra.Command{
 			fmt.Printf("⚠ could not register statusline: %v\n", err)
 		}
 
-		if _, err := exec.LookPath("clauder"); err == nil {
-			fmt.Println("✓ clauder found — sessions will launch via `clauder wrap` (cross-instance messaging + memory)")
-		} else {
-			fmt.Println("· clauder not installed (optional): https://github.com/MaorBril/clauder")
+		if ensureClauder() {
+			fmt.Println("  sessions will launch via `clauder wrap` (cross-instance messaging + memory)")
 		}
 
 		fmt.Println("\nDone. Start a session with: agentic")
