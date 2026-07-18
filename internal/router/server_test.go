@@ -174,6 +174,13 @@ func TestAutoRouteEndToEnd(t *testing.T) {
 	if !strings.Contains(respBody, `"model":"auto"`) {
 		t.Errorf("alias not echoed: %s", respBody)
 	}
+
+	// The routing decision is persisted so the statusline can show it.
+	alias, tier, model, ok, err := st.LatestRouteDecision("sess-test")
+	if err != nil || !ok || alias != "auto" || tier != "deep" || model != "big" {
+		t.Errorf("route decision: alias=%s tier=%s model=%s ok=%v err=%v, want auto/deep/big/true/nil",
+			alias, tier, model, ok, err)
+	}
 }
 
 func TestBudgetHardStop(t *testing.T) {

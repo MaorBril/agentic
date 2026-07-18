@@ -71,6 +71,13 @@ CREATE TABLE IF NOT EXISTS usage_events (
   status            INTEGER,
   err_type          TEXT
 );
+CREATE TABLE IF NOT EXISTS route_decisions (
+  session_id TEXT PRIMARY KEY,
+  alias      TEXT,
+  tier       TEXT,
+  model      TEXT,
+  at         INTEGER
+);
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_events(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
 `)
@@ -116,6 +123,28 @@ func (s *Store) StartSession(id, profile, workDir string, at time.Time) error {
 func (s *Store) EndSession(id string, at time.Time) error {
 	_, err := s.db.Exec(`UPDATE sessions SET ended_at = ? WHERE id = ?`, at.Unix(), id)
 	return err
+}
+
+// RecordRouteDecision persists the auto-router's tier/model choice for a
+// session's current turn, overwriting any prior decision for that session
+// (a session re-classifies as new user turns arrive).
+func (s *Store) RecordRouteDecision(sessionID, alias, tier, model string, at time.Time) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO route_decisions
+(session_id, alias, tier, model, at) VALUES (?,?,?,?,?)`,
+		sessionID, alias, tier, model, at.Unix())
+	return err
+}
+
+// LatestRouteDecision returns the most recent auto-router decision recorded
+// for a session, if any. ok is false when no decision has been recorded yet
+// (e.g. the profile isn't using a routing alias).
+func (s *Store) LatestRouteDecision(sessionID string) (alias, tier, model string, ok bool, err error) {
+	row := s.db.QueryRow(`SELECT alias, tier, model FROM route_decisions WHERE session_id = ?`, sessionID)
+	err = row.Scan(&alias, &tier, &model)
+	if err == sql.ErrNoRows {
+		return "", "", "", false, nil
+	}
+	return alias, tier, model, err == nil, err
 }
 
 // SpendRow is one line of a cost report.

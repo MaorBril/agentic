@@ -49,8 +49,20 @@ var statuslineCmd = &cobra.Command{
 		sess, _ := st.TotalSince(time.Time{}, "", sessionID)
 		day, _ := st.TotalSince(dayStart, "", "")
 
+		modelPart := orDefault(input.Model.DisplayName, "?")
+		if alias, tier, model, ok, _ := st.LatestRouteDecision(sessionID); ok && alias == input.Model.DisplayName {
+			tierColor := map[string]string{
+				"deep":     "\033[35m", // magenta
+				"standard": "\033[36m", // cyan
+				"light":    "\033[32m", // green
+			}[tier]
+			if tierColor != "" {
+				modelPart = fmt.Sprintf("%s→%s%s\033[0m (%s)", alias, tierColor, model, tier)
+			}
+		}
+
 		line := fmt.Sprintf("%s · %s · sess $%.2f · day $%.2f",
-			orDefault(profile, "agentic"), orDefault(input.Model.DisplayName, "?"), sess, day)
+			orDefault(profile, "agentic"), modelPart, sess, day)
 
 		if cfg.Budgets != nil && cfg.Budgets.Daily > 0 {
 			frac := day / cfg.Budgets.Daily

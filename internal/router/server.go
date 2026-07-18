@@ -115,11 +115,17 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 			return
 		}
 		cfg := s.cfg.Load()
+		sessionID := r.Header.Get("X-Agentic-Session")
 		resolveAlias := env.Model
 		if rule, ok := cfg.Routing[env.Model]; ok {
-			chosen, tier := s.auto.route(r.Context(), rule, cfg, raw, r.Header.Get("X-Agentic-Session"))
+			chosen, tier := s.auto.route(r.Context(), rule, cfg, raw, sessionID)
 			s.log.Info("autoroute", "alias", env.Model, "tier", tier, "model", chosen)
 			resolveAlias = chosen
+			if sessionID != "" {
+				if err := s.store.RecordRouteDecision(sessionID, env.Model, tier, chosen, time.Now()); err != nil {
+					s.log.Warn("route decision insert failed", "err", err)
+				}
+			}
 		}
 		route, err := cfg.Resolve(resolveAlias)
 		if err != nil {
