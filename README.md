@@ -17,6 +17,20 @@ Claude Code is a great harness, and it keeps getting better — forking it means
 
 agentic answers both without touching Claude Code itself. Claude Code officially supports pointing at a gateway via `ANTHROPIC_BASE_URL`; agentic is that gateway, plus the CLI around it.
 
+## Compared to other options
+
+There are three ways people solve "I want Claude Code but not locked to one provider":
+
+| | agentic | claude-code-router / claude-code-proxy forks / LiteLLM | OpenCode, Crush, Goose, Aider |
+|---|---|---|---|
+| **Harness** | Real Claude Code, unmodified, auto-updating | Real Claude Code, unmodified | Different harness entirely — own prompts, tools, TUI |
+| **Runs as** | Static Go binary, no daemon (leader election over a fixed port) | Daemon / server process you deploy and administer | Standalone CLI you run instead of Claude Code |
+| **Cost & budgets** | First-class CLI: `agentic cost`, live statusline, hard-stop daily/weekly/monthly budgets | Usually a dashboard (LiteLLM) or not built in | Varies by tool, rarely budget-gated |
+| **Model routing** | Aliases + a built-in LLM-classifier tier router (`auto`), sticky per turn | Rule-based routing configs; no classifier-based tiering | Manual model switch, no auto-routing |
+| **Memory / cross-instance** | Composes with [clauder](https://github.com/MaorBril/clauder) — separate binary, optional | Not their concern | Varies |
+
+The short version: agentic doesn't try to be a better harness than Claude Code — it keeps Claude Code exactly as Anthropic ships it and only swaps what's behind `ANTHROPIC_BASE_URL`. If you want a different agent loop altogether, OpenCode/Crush/Goose/Aider are the right layer to look at instead. If you want a gateway you deploy and administer for a team, LiteLLM is a more mature choice for that. agentic is for a single developer who wants `claude`, unmodified, with a budget and a cheap-model escape hatch, installed in one command and running with nothing to operate.
+
 ## How it works
 
 ```
