@@ -78,6 +78,12 @@ CREATE TABLE IF NOT EXISTS route_decisions (
   model      TEXT,
   at         INTEGER
 );
+CREATE TABLE IF NOT EXISTS goal_decisions (
+  session_id TEXT PRIMARY KEY,
+  goal       INTEGER,
+  reason     TEXT,
+  at         INTEGER
+);
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_events(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
 `)
@@ -145,6 +151,28 @@ func (s *Store) LatestRouteDecision(sessionID string) (alias, tier, model string
 		return "", "", "", false, nil
 	}
 	return alias, tier, model, err == nil, err
+}
+
+// RecordGoalDecision persists the auto-goal classifier's verdict for a
+// session's current turn, overwriting any prior decision for that session
+// (a session re-classifies as new user turns arrive).
+func (s *Store) RecordGoalDecision(sessionID string, goal bool, reason string, at time.Time) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO goal_decisions
+(session_id, goal, reason, at) VALUES (?,?,?,?)`,
+		sessionID, boolToInt(goal), reason, at.Unix())
+	return err
+}
+
+// LatestGoalDecision returns the most recent auto-goal verdict recorded for
+// a session, if any. ok is false when no decision has been recorded yet.
+func (s *Store) LatestGoalDecision(sessionID string) (goal bool, reason string, ok bool, err error) {
+	row := s.db.QueryRow(`SELECT goal, reason FROM goal_decisions WHERE session_id = ?`, sessionID)
+	var g int
+	err = row.Scan(&g, &reason)
+	if err == sql.ErrNoRows {
+		return false, "", false, nil
+	}
+	return g != 0, reason, err == nil, err
 }
 
 // SpendRow is one line of a cost report.

@@ -143,21 +143,40 @@ func truncate(s string, n int) string {
 }
 
 // classifyViaBackend runs the classifier request through the router's own
-// backends and parses the one-word answer.
+// backends and parses the one-word tier answer.
 func (s *Server) classifyViaBackend(ctx context.Context, rule config.RouteRule, cfg *config.Config, summary string) (string, error) {
-	route, err := cfg.Resolve(rule.Classifier)
+	resp, err := s.runClassifier(ctx, rule, cfg, classifierPrompt+summary, 8)
 	if err != nil {
 		return "", err
 	}
+	for _, block := range resp.Content {
+		if block.Type == "text" {
+			word := strings.ToLower(strings.TrimSpace(block.Text))
+			word = strings.Trim(word, ".\"' \n")
+			return word, nil
+		}
+	}
+	return "", fmt.Errorf("classifier returned no text")
+}
+
+// runClassifier sends a single-turn prompt to a classifier model alias
+// through the router's own backends (no network hop out and back through
+// the local port) and returns the parsed Anthropic-shaped response. Shared
+// by any classification pass (tier routing, goal detection, ...).
+func (s *Server) runClassifier(ctx context.Context, rule config.RouteRule, cfg *config.Config, prompt string, maxTokens int) (*anthropic.MessagesResponse, error) {
+	route, err := cfg.Resolve(rule.Classifier)
+	if err != nil {
+		return nil, err
+	}
 	body, err := json.Marshal(map[string]any{
 		"model":      rule.Classifier,
-		"max_tokens": 8,
+		"max_tokens": maxTokens,
 		"messages": []map[string]any{
-			{"role": "user", "content": classifierPrompt + summary},
+			{"role": "user", "content": prompt},
 		},
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	env, _ := anthropic.ParseEnvelope(body)
 	call := &backend.Call{Raw: body, Envelope: env, Route: route, Header: http.Header{}, Query: nil}
@@ -170,24 +189,17 @@ func (s *Server) classifyViaBackend(ctx context.Context, rule config.RouteRule, 
 	case config.ProviderOpenAI:
 		be = s.oai
 	default:
-		return "", fmt.Errorf("classifier provider type %q unsupported", route.Provider.Type)
+		return nil, fmt.Errorf("classifier provider type %q unsupported", route.Provider.Type)
 	}
 	res := be.Messages(ctx, call, rec)
 	if res.Status != 200 {
-		return "", fmt.Errorf("classifier request failed: %d %s", res.Status, res.ErrType)
+		return nil, fmt.Errorf("classifier request failed: %d %s", res.Status, res.ErrType)
 	}
 	var resp anthropic.MessagesResponse
 	if err := json.Unmarshal(rec.buf.Bytes(), &resp); err != nil {
-		return "", err
+		return nil, err
 	}
-	for _, block := range resp.Content {
-		if block.Type == "text" {
-			word := strings.ToLower(strings.TrimSpace(block.Text))
-			word = strings.Trim(word, ".\"' \n")
-			return word, nil
-		}
-	}
-	return "", fmt.Errorf("classifier returned no text")
+	return &resp, nil
 }
 
 // memWriter is an in-memory http.ResponseWriter for internal requests.

@@ -168,8 +168,12 @@ func TestAutoRouteEndToEnd(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d: %s", resp.StatusCode, respBody)
 	}
-	if len(seenModels) != 2 || seenModels[0] != "classifier-upstream" || seenModels[1] != "deep-upstream" {
-		t.Errorf("upstream saw %v, want [classifier-upstream deep-upstream]", seenModels)
+	// Two classifier calls hit the fake upstream before the routed call:
+	// tier routing, then goal detection (its answer here is the tier
+	// classifier's plain-text reply, which fails to parse as goal JSON and
+	// fails open — that's fine, this test only cares about routing).
+	if len(seenModels) != 3 || seenModels[0] != "classifier-upstream" || seenModels[1] != "classifier-upstream" || seenModels[2] != "deep-upstream" {
+		t.Errorf("upstream saw %v, want [classifier-upstream classifier-upstream deep-upstream]", seenModels)
 	}
 	if !strings.Contains(respBody, `"model":"auto"`) {
 		t.Errorf("alias not echoed: %s", respBody)
@@ -180,6 +184,96 @@ func TestAutoRouteEndToEnd(t *testing.T) {
 	if err != nil || !ok || alias != "auto" || tier != "deep" || model != "big" {
 		t.Errorf("route decision: alias=%s tier=%s model=%s ok=%v err=%v, want auto/deep/big/true/nil",
 			alias, tier, model, ok, err)
+	}
+}
+
+// TestAutoGoalEndToEnd exercises goal detection through the full server:
+// a goal-worthy classifier verdict must show up in the forwarded request's
+// system prompt (as the harness's own loop sentinel) and be persisted.
+func TestAutoGoalEndToEnd(t *testing.T) {
+	var routedBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		json.Unmarshal(body, &req)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case len(req.Messages) > 0 && strings.Contains(req.Messages[0].Content, "persistent recurring loop"):
+			// The goal classifier call.
+			fmt.Fprint(w, `{"id":"g","choices":[{"index":0,"message":{"role":"assistant","content":"{\"goal\":true,\"reason\":\"polling a long build\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":40,"completion_tokens":10}}`)
+		case req.Model == "classifier-upstream":
+			// The tier classifier call.
+			fmt.Fprint(w, `{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"standard"},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":1}}`)
+		default:
+			// The routed main-model call — capture what actually got sent.
+			routedBody = string(body)
+			fmt.Fprint(w, `{"id":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`)
+		}
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Providers: map[string]config.Provider{
+			"fake": {Type: config.ProviderOpenAI, BaseURL: upstream.URL},
+		},
+		Models: map[string]config.Model{
+			"cheap":    {Provider: "fake", ID: "classifier-upstream"},
+			"standard": {Provider: "fake", ID: "standard-upstream"},
+		},
+		Routing: map[string]config.RouteRule{
+			"auto": {Classifier: "cheap", Default: "standard",
+				Tiers: map[string]string{"standard": "standard"}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "agentic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := NewServer(cfg, testToken, dir, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, respBody := post(t, ts.URL+"/v1/messages", testToken,
+		`{"model":"auto","max_tokens":50,"messages":[{"role":"user","content":"keep checking every few minutes whether the build passes"}]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, respBody)
+	}
+
+	var routed struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(routedBody), &routed); err != nil {
+		t.Fatalf("routed body not JSON: %v\n%s", err, routedBody)
+	}
+	var systemContent string
+	for _, m := range routed.Messages {
+		if m.Role == "system" {
+			systemContent = m.Content
+		}
+	}
+	for _, want := range []string{"<system-reminder>", "<<autonomous-loop-dynamic>>", "polling a long build"} {
+		if !strings.Contains(systemContent, want) {
+			t.Errorf("routed request's system message missing %q:\n%s", want, systemContent)
+		}
+	}
+
+	goal, reason, ok, err := st.LatestGoalDecision("sess-test")
+	if err != nil || !ok || !goal || reason != "polling a long build" {
+		t.Errorf("goal decision: goal=%v reason=%q ok=%v err=%v, want true/\"polling a long build\"/true/nil",
+			goal, reason, ok, err)
 	}
 }
 
