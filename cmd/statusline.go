@@ -64,6 +64,10 @@ var statuslineCmd = &cobra.Command{
 		line := fmt.Sprintf("%s · %s · sess $%.2f · day $%.2f",
 			orDefault(profile, "agentic"), modelPart, sess, day)
 
+		if goal, reason, ok, _ := st.LatestGoalDecision(sessionID); ok && goal {
+			line += fmt.Sprintf(" · \033[33m⟳ goal\033[0m (%s)", truncateForStatus(reason))
+		}
+
 		if cfg.Budgets != nil && cfg.Budgets.Daily > 0 {
 			frac := day / cfg.Budgets.Daily
 			color := "\033[32m" // green
@@ -89,6 +93,16 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// truncateForStatus caps a classifier reason so a verbose answer can't blow
+// out the status line.
+func truncateForStatus(s string) string {
+	const max = 24
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
 }
 
 func init() {

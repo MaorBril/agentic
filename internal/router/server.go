@@ -33,6 +33,7 @@ type Server struct {
 	oai     *openaibe.Backend
 	gate    *budget.Gate
 	auto    *autoRouter
+	goal    *goalRouter
 	log     *slog.Logger
 }
 
@@ -45,6 +46,7 @@ func NewServer(cfg *config.Config, token, dataDir string, st *store.Store, logge
 	s.pricing.Store(pricing.Load(dataDir, cfg))
 	s.gate = budget.NewGate(cfg, st, logger)
 	s.auto = &autoRouter{classify: s.classifyViaBackend, cache: map[string]decision{}}
+	s.goal = &goalRouter{classify: s.classifyGoalViaBackend}
 	return s
 }
 
@@ -124,6 +126,22 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 			if sessionID != "" {
 				if err := s.store.RecordRouteDecision(sessionID, env.Model, tier, chosen, time.Now()); err != nil {
 					s.log.Warn("route decision insert failed", "err", err)
+				}
+				worthy, reason, isNewTurn := s.goal.check(r.Context(), rule, cfg, raw, sessionID)
+				if worthy {
+					if injected, err := injectGoalReminder(raw, reason); err == nil {
+						raw = injected
+					} else {
+						s.log.Warn("goal reminder injection failed", "err", err)
+					}
+					s.log.Info("autogoal", "session", sessionID, "reason", reason)
+				}
+				// Continuations (tool results) never re-classify, so they
+				// must not clobber a decision recorded when the turn opened.
+				if isNewTurn {
+					if err := s.store.RecordGoalDecision(sessionID, worthy, reason, time.Now()); err != nil {
+						s.log.Warn("goal decision insert failed", "err", err)
+					}
 				}
 			}
 		}

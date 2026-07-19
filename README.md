@@ -104,6 +104,28 @@ $ grep autoroute ~/.agentic/router.log
 
 `agentic cost --by model` then shows how spend actually distributed across tiers. Each classification costs one tiny request to the classifier model (~$0.0005 with haiku).
 
+## Auto Goal
+
+Whenever a `routing:` alias like `auto` is in play, a second, independent classifier pass looks at each new user turn and asks a different question: not "which tier?" but "does this look like it needs a persistent loop rather than a single reply?" — monitoring a long build, retrying until a condition holds, babysitting a deploy, polling for external state.
+
+When the answer is yes, agentic doesn't (and can't) start a loop itself — the router only ever sees request and response bodies, it has no execution context inside the Claude Code process. Instead it appends a system-reminder to the request naming the harness's own mechanisms directly:
+
+```
+<system-reminder>
+agentic: this task looks well suited to a recurring goal loop rather than a
+single reply (polling a long build). If a persistent loop would help —
+checking back on progress, retrying until a condition holds, babysitting a
+long-running process — call ScheduleWakeup with prompt
+"<<autonomous-loop-dynamic>>" and a reason, or invoke the /loop skill. This
+is a suggestion, not a requirement: ignore it for tasks that finish in one
+pass.
+</system-reminder>
+```
+
+Claude Code decides whether to act on it — the reminder is a nudge, not a command. Decisions are logged (`grep autogoal ~/.agentic/router.log`) and, like tier decisions, surfaced in the statusline (`⟳ goal (polling a long build)`).
+
+This rides on the same classifier alias as dynamic routing, so it's on wherever `routing: auto` is configured, at the cost of one extra cheap classifier call per new turn alongside the tier call.
+
 ## Budgets
 
 Daily, weekly, and monthly caps — global and per profile. When a cap is hit, the router refuses the *next* request with a clear message that shows up right in the Claude Code TUI; in-flight responses are never cut. Warnings surface in the statusline (`agentic setup` registers it), which shows live session and daily spend:
