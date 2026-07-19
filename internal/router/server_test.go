@@ -275,6 +275,25 @@ func TestAutoGoalEndToEnd(t *testing.T) {
 		t.Errorf("goal decision: goal=%v reason=%q ok=%v err=%v, want true/\"polling a long build\"/true/nil",
 			goal, reason, ok, err)
 	}
+
+	// A tool_result continuation of the same turn must not clobber the
+	// decision recorded when the turn opened — the goal classifier never
+	// re-runs mid-turn (mirrors autoRoute's stickiness), so the prior
+	// verdict must still be persisted afterward.
+	resp, respBody = post(t, ts.URL+"/v1/messages", testToken,
+		`{"model":"auto","max_tokens":50,"messages":[
+			{"role":"user","content":"keep checking every few minutes whether the build passes"},
+			{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"check_build","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"still running"}]}
+		]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("continuation status %d: %s", resp.StatusCode, respBody)
+	}
+	goal, reason, ok, err = st.LatestGoalDecision("sess-test")
+	if err != nil || !ok || !goal || reason != "polling a long build" {
+		t.Errorf("goal decision after continuation: goal=%v reason=%q ok=%v err=%v, want true/\"polling a long build\"/true/nil (must not be clobbered)",
+			goal, reason, ok, err)
+	}
 }
 
 func TestBudgetHardStop(t *testing.T) {

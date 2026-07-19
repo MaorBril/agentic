@@ -38,27 +38,44 @@ The reason should be omitted or empty when goal is false.
 Request to classify:
 `
 
-// check decides whether the current turn is goal-worthy. It fails open
-// (worthy=false) on classifier errors, unparseable answers, or when the
-// request isn't a fresh user turn — a tool_result continuation was already
-// assessed (or not) when its turn opened.
-func (g *goalRouter) check(ctx context.Context, rule config.RouteRule, cfg *config.Config, raw []byte, sessionID string) (worthy bool, reason string) {
+// check decides whether the current turn is goal-worthy. isNewTurn tells
+// the caller whether a decision was made at all: continuations never
+// re-classify, so callers must not overwrite the prior persisted decision
+// when isNewTurn is false (that decision belongs to the turn still in
+// flight). worthy fails open (false) on classifier errors or unparseable
+// answers.
+func (g *goalRouter) check(ctx context.Context, rule config.RouteRule, cfg *config.Config, raw []byte, sessionID string) (worthy bool, reason string, isNewTurn bool) {
 	req, err := anthropic.ParseRequest(raw)
 	if err != nil {
-		return false, ""
+		return false, "", false
 	}
 	userText, isNewTurn := lastUserText(req)
 	if !isNewTurn || userText == "" {
-		return false, ""
+		return false, "", isNewTurn
 	}
 
 	summary := fmt.Sprintf("(conversation: %d messages, %d tools available)\n%s",
 		len(req.Messages), len(req.Tools), truncate(userText, 2000))
 	decision, err := g.classify(ctx, rule, cfg, summary)
 	if err != nil {
-		return false, ""
+		return false, "", true
 	}
-	return decision.Goal, strings.TrimSpace(decision.Reason)
+	return decision.Goal, sanitizeReason(decision.Reason), true
+}
+
+// sanitizeReason clamps and neuters a classifier-provided reason before it
+// is spliced into the system prompt. The classifier is asked for a short
+// phrase, but that's a request, not a guarantee — this strips characters
+// that could break out of the <system-reminder> block if the classifier
+// echoes injected content back from the turn it read.
+func sanitizeReason(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.NewReplacer("<", "", ">", "", "\n", " ", "\r", " ").Replace(s)
+	const max = 80
+	if len(s) > max {
+		s = strings.TrimSpace(s[:max])
+	}
+	return s
 }
 
 // classifyGoalViaBackend runs the goal-detection prompt through the

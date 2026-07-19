@@ -127,7 +127,7 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 				if err := s.store.RecordRouteDecision(sessionID, env.Model, tier, chosen, time.Now()); err != nil {
 					s.log.Warn("route decision insert failed", "err", err)
 				}
-				worthy, reason := s.goal.check(r.Context(), rule, cfg, raw, sessionID)
+				worthy, reason, isNewTurn := s.goal.check(r.Context(), rule, cfg, raw, sessionID)
 				if worthy {
 					if injected, err := injectGoalReminder(raw, reason); err == nil {
 						raw = injected
@@ -136,8 +136,12 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 					}
 					s.log.Info("autogoal", "session", sessionID, "reason", reason)
 				}
-				if err := s.store.RecordGoalDecision(sessionID, worthy, reason, time.Now()); err != nil {
-					s.log.Warn("goal decision insert failed", "err", err)
+				// Continuations (tool results) never re-classify, so they
+				// must not clobber a decision recorded when the turn opened.
+				if isNewTurn {
+					if err := s.store.RecordGoalDecision(sessionID, worthy, reason, time.Now()); err != nil {
+						s.log.Warn("goal decision insert failed", "err", err)
+					}
 				}
 			}
 		}
