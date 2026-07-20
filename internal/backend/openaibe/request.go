@@ -79,7 +79,16 @@ func TranslateRequest(req *anthropic.MessagesRequest, route config.Resolved) (*o
 	case "effort":
 		out.ReasoningEffort = effortFromBudget(req.Thinking)
 		// Reasoning models reject sampling params.
-	case "passive", "none", "":
+	case "none":
+		// GPT-5-class models default to some reasoning mode unless told
+		// otherwise, and reject function tools in that mode on
+		// /v1/chat/completions ("Function tools with reasoning_effort
+		// are not supported ... set reasoning_effort to 'none'").
+		// Setting it explicitly opts back into tool support.
+		out.ReasoningEffort = "none"
+		out.Temperature = req.Temperature
+		out.TopP = req.TopP
+	case "passive", "":
 		out.Temperature = req.Temperature
 		out.TopP = req.TopP
 	}

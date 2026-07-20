@@ -149,6 +149,16 @@ func TestReasoningModes(t *testing.T) {
 	if out.Temperature == nil {
 		t.Error("passive keeps sampling params")
 	}
+
+	// none: reasoning_effort explicitly "none" (GPT-5-class models reject
+	// function tools otherwise), sampling kept
+	out, _ = TranslateRequest(parseReq(t, body), route("", "none"))
+	if out.ReasoningEffort != "none" {
+		t.Errorf("none must explicitly set reasoning_effort=\"none\", got %q", out.ReasoningEffort)
+	}
+	if out.Temperature == nil {
+		t.Error("none keeps sampling params")
+	}
 }
 
 func TestImageTranslation(t *testing.T) {

@@ -72,9 +72,12 @@ func (p Provider) Key() string {
 type Model struct {
 	Provider string `yaml:"provider"`
 	ID       string `yaml:"id"`
-	// Reasoning: "" or "none" (strip thinking), "effort" (map
-	// budget_tokens to reasoning_effort), "passive" (model always
-	// reasons; parse reasoning_content).
+	// Reasoning: "" (no reasoning param, sampling kept), "none" (like ""
+	// but also explicitly sends reasoning_effort=none — required by
+	// GPT-5-class models to accept function tools on
+	// /v1/chat/completions), "effort" (map budget_tokens to
+	// reasoning_effort, sampling dropped), "passive" (model always
+	// reasons; parse reasoning_content, sampling kept).
 	Reasoning string `yaml:"reasoning"`
 	// MaxOutput clamps requested max_tokens to the model's output cap
 	// (Claude Code asks for 32K+; many models cap lower).
