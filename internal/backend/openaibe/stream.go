@@ -3,8 +3,10 @@ package openaibe
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
+	"time"
 
 	"github.com/maorbril/agentic/internal/anthropic"
 	"github.com/maorbril/agentic/internal/openai"
@@ -23,65 +25,113 @@ type streamState struct {
 	index        int    // next content block index
 	openType     string // "", "thinking", "text", "tool"
 	openaiToolIx int    // openai tool_call index of the open tool block
+	openToolID   string // openai tool_call id of the open tool block
 	pendingArgs  string // tool args buffered before the block could open
 	pendingID    string
 	pendingName  string
 	havePending  bool
 
-	finishReason string
-	sawToolCall  bool
-	usage        anthropic.Usage
+	finishReason   string
+	sawToolCall    bool
+	usage          anthropic.Usage
+	keepAliveEvery time.Duration // ping cadence while the upstream is quiet
 }
 
 func newStreamState(sse *anthropic.SSEWriter, alias string) *streamState {
-	return &streamState{sse: sse, alias: alias, openaiToolIx: -1}
+	return &streamState{sse: sse, alias: alias, openaiToolIx: -1, keepAliveEvery: 15 * time.Second}
 }
 
-// Run consumes the upstream SSE body until EOF or [DONE], returning final
-// usage. A mid-stream upstream error is forwarded as an Anthropic error
-// event (Claude Code retries on it).
-func (s *streamState) Run(body io.Reader) (anthropic.Usage, string) {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		data, ok := bytes.CutPrefix(line, []byte("data: "))
-		if !ok {
-			continue
+// Run consumes the upstream SSE body until EOF, [DONE], or ctx cancellation,
+// returning final usage. A mid-stream upstream error is forwarded as an
+// Anthropic error event (Claude Code retries on it). While the upstream is
+// quiet — slow reasoning models can sit for a minute before the first token —
+// pings keep the client from timing out on a byte-silent connection.
+func (s *streamState) Run(ctx context.Context, body io.Reader) (anthropic.Usage, string) {
+	lines := make(chan []byte)
+	scanErr := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+		for scanner.Scan() {
+			line := append([]byte(nil), scanner.Bytes()...)
+			select {
+			case lines <- line:
+			case <-ctx.Done():
+				return
+			}
 		}
-		if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-			break
+		scanErr <- scanner.Err()
+	}()
+
+	keepAlive := time.NewTicker(s.keepAliveEvery)
+	defer keepAlive.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Client hung up or the turn was cancelled; the transport closes
+			// the upstream body for us, so just stop translating.
+			return s.usage, "client_disconnect"
+		case <-keepAlive.C:
+			s.ping()
+		case err := <-scanErr:
+			if err != nil {
+				s.sse.ErrorEvent("api_error", "upstream stream: "+err.Error())
+				return s.usage, "api_error"
+			}
+			s.finalize()
+			return s.usage, ""
+		case line := <-lines:
+			data, ok := bytes.CutPrefix(line, []byte("data: "))
+			if !ok {
+				continue
+			}
+			if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+				s.finalize()
+				return s.usage, ""
+			}
+			var chunk openai.Chunk
+			if err := json.Unmarshal(data, &chunk); err != nil {
+				continue // tolerate provider noise between data lines
+			}
+			if chunk.Error != nil {
+				s.sse.ErrorEvent("api_error", "upstream: "+chunk.Error.Message)
+				return s.usage, "api_error"
+			}
+			s.handleChunk(&chunk)
 		}
-		var chunk openai.Chunk
-		if err := json.Unmarshal(data, &chunk); err != nil {
-			continue // tolerate provider noise between data lines
-		}
-		if chunk.Error != nil {
-			s.sse.ErrorEvent("api_error", "upstream: "+chunk.Error.Message)
-			return s.usage, "api_error"
-		}
-		s.handleChunk(&chunk)
 	}
-	if err := scanner.Err(); err != nil {
-		s.sse.ErrorEvent("api_error", "upstream stream: "+err.Error())
-		return s.usage, "api_error"
+}
+
+// ping keeps the client connection alive while the upstream is quiet. The
+// SSE grammar requires message_start first, so if no chunk has arrived yet
+// the message is opened with a synthetic id (handleChunk won't re-open it).
+func (s *streamState) ping() {
+	if !s.started {
+		s.startMessage("msg_agentic_pending")
+		return // startMessage already pings
 	}
-	s.finalize()
-	return s.usage, ""
+	s.sse.Ping()
+}
+
+// startMessage emits message_start + ping once; later calls are no-ops.
+func (s *streamState) startMessage(id string) {
+	if s.started {
+		return
+	}
+	s.started = true
+	s.sse.Event("message_start", map[string]any{
+		"type": "message_start",
+		"message": anthropic.MessagesResponse{
+			ID: id, Type: "message", Role: "assistant",
+			Model: s.alias, Content: []anthropic.ContentBlock{},
+		},
+	})
+	s.sse.Ping()
 }
 
 func (s *streamState) handleChunk(chunk *openai.Chunk) {
-	if !s.started {
-		s.started = true
-		s.sse.Event("message_start", map[string]any{
-			"type": "message_start",
-			"message": anthropic.MessagesResponse{
-				ID: "msg_" + chunk.ID, Type: "message", Role: "assistant",
-				Model: s.alias, Content: []anthropic.ContentBlock{},
-			},
-		})
-		s.sse.Ping()
-	}
+	s.startMessage("msg_" + chunk.ID)
 	if chunk.Usage != nil {
 		s.usage = mapUsage(chunk.Usage)
 	}
@@ -114,14 +164,23 @@ func (s *streamState) handleChunk(chunk *openai.Chunk) {
 }
 
 func (s *streamState) handleToolDelta(tc openai.ToolCall) {
-	ix := 0
+	// A tool call is in progress while its block is open or its header is
+	// still buffering. A new call is signaled by a different openai index,
+	// or — for providers that omit the index — by a fresh id. Fragments with
+	// neither continue the call in progress.
+	inTool := s.openType == "tool" || s.havePending
+	newTool := !inTool
 	if tc.Index != nil {
-		ix = *tc.Index
+		newTool = newTool || *tc.Index != s.openaiToolIx
+	} else if tc.ID != "" && tc.ID != s.currentToolID() {
+		newTool = true
 	}
-	newTool := s.openType != "tool" || ix != s.openaiToolIx
 	if newTool {
 		s.closeBlock()
-		s.openaiToolIx = ix
+		s.openaiToolIx = -1
+		if tc.Index != nil {
+			s.openaiToolIx = *tc.Index
+		}
 		s.pendingID, s.pendingName, s.pendingArgs = tc.ID, tc.Function.Name, ""
 		s.havePending = true
 	} else if s.havePending {
@@ -146,6 +205,15 @@ func (s *streamState) handleToolDelta(tc openai.ToolCall) {
 	}
 }
 
+// currentToolID is the openai id of the call in progress: the buffered
+// header's id before the block opens, the open block's id after.
+func (s *streamState) currentToolID() string {
+	if s.havePending {
+		return s.pendingID
+	}
+	return s.openToolID
+}
+
 func (s *streamState) openToolBlock() {
 	id := s.pendingID
 	if id == "" {
@@ -156,6 +224,7 @@ func (s *streamState) openToolBlock() {
 		"content_block": map[string]any{"type": "tool_use", "id": id, "name": s.pendingName, "input": map[string]any{}},
 	})
 	s.openType = "tool"
+	s.openToolID = s.pendingID
 	s.sawToolCall = true
 	s.index++
 	args := s.pendingArgs
@@ -214,6 +283,7 @@ func (s *streamState) closeBlock() {
 	s.sse.Event("content_block_stop", map[string]any{"type": "content_block_stop", "index": s.index - 1})
 	s.openType = ""
 	s.openaiToolIx = -1
+	s.openToolID = ""
 }
 
 func (s *streamState) finalize() {

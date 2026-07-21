@@ -69,8 +69,12 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 	if req.Stream {
 		sse := anthropic.NewSSEWriter(w)
 		state := newStreamState(sse, call.Envelope.Model)
-		usage, errType := state.Run(resp.Body)
-		return backend.Result{Status: 200, Usage: usage, ErrType: errType}
+		usage, errType := state.Run(ctx, resp.Body)
+		status := 200
+		if errType == "client_disconnect" {
+			status = 499
+		}
+		return backend.Result{Status: status, Usage: usage, ErrType: errType}
 	}
 
 	raw, err := io.ReadAll(resp.Body)

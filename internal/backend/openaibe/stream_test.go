@@ -1,10 +1,13 @@
 package openaibe
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/maorbril/agentic/internal/anthropic"
 )
@@ -20,7 +23,7 @@ func runStream(t *testing.T, chunks []string) []event {
 		body += "data: " + c + "\n\n"
 	}
 	body += "data: [DONE]\n\n"
-	usage, errType := state.Run(strings.NewReader(body))
+	usage, errType := state.Run(context.Background(), strings.NewReader(body))
 	_ = usage
 	if errType != "" {
 		t.Fatalf("stream errType=%q", errType)
@@ -164,17 +167,18 @@ func TestStreamReasoningContent(t *testing.T) {
 }
 
 func TestStreamSplitToolHeader(t *testing.T) {
-	// Some providers split id and name across chunks — args must buffer.
+	// Some providers split id and name across chunks — args must buffer, and
+	// the fragments must land in a single tool block.
 	evs := runStream(t, []string{
 		`{"id":"c4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"arguments":"{\"a\""}}]}}]}`,
 		`{"id":"c4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"late_name","arguments":":1}"}}]}}]}`,
 		`{"id":"c4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	})
-	var opened string
+	var starts []map[string]any
 	var args string
 	for _, e := range evs {
 		if e.name == "content_block_start" {
-			opened = e.data["content_block"].(map[string]any)["name"].(string)
+			starts = append(starts, e.data["content_block"].(map[string]any))
 		}
 		if e.name == "content_block_delta" {
 			d := e.data["delta"].(map[string]any)
@@ -183,7 +187,112 @@ func TestStreamSplitToolHeader(t *testing.T) {
 			}
 		}
 	}
-	if opened != "late_name" || args != `{"a":1}` {
-		t.Errorf("opened=%q args=%q", opened, args)
+	if len(starts) != 1 {
+		t.Fatalf("expected 1 tool block, got %d: %s", len(starts), names(evs))
+	}
+	if starts[0]["name"] != "late_name" || starts[0]["id"] != "call_x" || args != `{"a":1}` {
+		t.Errorf("opened=%v args=%q", starts[0], args)
+	}
+}
+
+func TestStreamToolCallsWithoutIndex(t *testing.T) {
+	// Providers that omit tool_calls[].index (some xAI/OpenRouter/vLLM
+	// builds) signal a new call with a fresh id; args-only fragments carry
+	// neither and continue the open call.
+	evs := runStream(t, []string{
+		`{"id":"c5","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}`,
+		`{"id":"c5","choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"\"a.go\"}"}}]}}]}`,
+		`{"id":"c5","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b","function":{"name":"bash","arguments":"{\"cmd\":\"ls\"}"}}]}}]}`,
+		`{"id":"c5","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	})
+	var starts []map[string]any
+	argsByIndex := map[float64]string{}
+	for _, e := range evs {
+		if e.name == "content_block_start" {
+			starts = append(starts, e.data["content_block"].(map[string]any))
+		}
+		if e.name == "content_block_delta" {
+			d := e.data["delta"].(map[string]any)
+			if d["type"] == "input_json_delta" {
+				argsByIndex[e.data["index"].(float64)] += d["partial_json"].(string)
+			}
+		}
+	}
+	if len(starts) != 2 {
+		t.Fatalf("expected 2 tool blocks, got %d: %s", len(starts), names(evs))
+	}
+	if starts[0]["name"] != "read_file" || starts[1]["name"] != "bash" {
+		t.Errorf("tool names: %v %v", starts[0]["name"], starts[1]["name"])
+	}
+	if argsByIndex[0] != `{"path":"a.go"}` || argsByIndex[1] != `{"cmd":"ls"}` {
+		t.Errorf("args split wrong: %v", argsByIndex)
+	}
+}
+
+func TestStreamCancellation(t *testing.T) {
+	// A stalled upstream (body that never produces a byte) must not hang Run
+	// past ctx cancellation.
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	rec := httptest.NewRecorder()
+	state := newStreamState(anthropic.NewSSEWriter(rec), "gpt")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan string, 1)
+	go func() {
+		_, errType := state.Run(ctx, pr)
+		done <- errType
+	}()
+	cancel()
+	select {
+	case errType := <-done:
+		if errType != "client_disconnect" {
+			t.Errorf("errType = %q, want client_disconnect", errType)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancellation")
+	}
+}
+
+func TestStreamKeepAliveBeforeFirstChunk(t *testing.T) {
+	// While the upstream is quiet before the first token, pings must flow so
+	// the client doesn't time out on a byte-silent connection.
+	pr, pw := io.Pipe()
+	rec := httptest.NewRecorder()
+	state := newStreamState(anthropic.NewSSEWriter(rec), "gpt")
+	state.keepAliveEvery = 5 * time.Millisecond
+
+	done := make(chan struct{})
+	go func() {
+		state.Run(context.Background(), pr)
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	io.WriteString(pw, "data: {\"id\":\"c6\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	pw.Close()
+	<-done
+
+	evs := parseEvents(t, rec.Body.String())
+	if len(evs) == 0 || evs[0].name != "message_start" {
+		t.Fatalf("first event should be message_start, got: %s", names(evs))
+	}
+	pings := 0
+	for _, e := range evs {
+		if e.name == "ping" {
+			pings++
+		}
+	}
+	if pings < 2 {
+		t.Errorf("expected keep-alive pings before first chunk, got %d", pings)
+	}
+	// The real chunk must not re-open the message.
+	startCount := 0
+	for _, e := range evs {
+		if e.name == "message_start" {
+			startCount++
+		}
+	}
+	if startCount != 1 {
+		t.Errorf("message_start emitted %d times", startCount)
 	}
 }
