@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/maorbril/agentic/internal/anthropic"
 	"github.com/maorbril/agentic/internal/config"
@@ -56,7 +57,11 @@ func (g *goalRouter) check(ctx context.Context, rule config.RouteRule, cfg *conf
 
 	summary := fmt.Sprintf("(conversation: %d messages, %d tools available)\n%s",
 		len(req.Messages), len(req.Tools), truncate(userText, 2000))
-	decision, err := g.classify(ctx, rule, cfg, summary)
+	// Bounded like tier routing (autoroute.go): this runs inline before the
+	// real upstream call, so a stuck classifier would stall the whole turn.
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	decision, err := g.classify(cctx, rule, cfg, summary)
 	if err != nil {
 		return false, "", true
 	}
