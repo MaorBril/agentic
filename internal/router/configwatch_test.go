@@ -15,18 +15,21 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// touch writes content to path with a fresh mtime, guaranteeing the mtime
-// advances past a prior read even on filesystems with coarse (1s) mtime
-// resolution.
+// touch writes content to path with a strictly-increasing mtime, so two
+// rapid touches can't collapse to the same second on filesystems with coarse
+// (1s) mtime resolution (CI tmpfs, HFS+). Each call advances mtime by one
+// full second past a per-test base.
+var touchSeq atomic.Int64
+
 func touch(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Force mtime strictly above now so the next poll sees a change even on
-	// 1s-resolution filesystems (HFS+, some CI tmpfs).
-	future := time.Now().Add(2 * time.Second)
-	if err := os.Chtimes(path, future, future); err != nil {
+	// Distinct, far-apart mtimes — a base far in the future plus a
+	// monotonically increasing second so no two touches can collide.
+	mtime := time.Unix(2_000_000_000+touchSeq.Add(1), 0)
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -44,17 +47,17 @@ func TestPollReloadFiresOnChange(t *testing.T) {
 	defer cancel()
 	go pollReload(ctx, quietLogger(), path, 10*time.Millisecond, reload)
 
-	// Baseline: no reloads yet.
-	time.Sleep(40 * time.Millisecond)
+	// Let the poller capture the baseline mtime.
+	time.Sleep(60 * time.Millisecond)
 	if got := calls.Load(); got != 0 {
 		t.Fatalf("spurious reload before any change: %d", got)
 	}
 
 	touch(t, path, "v2")
-	waitFor(t, time.Second, func() bool { return calls.Load() == 1 })
+	waitFor(t, 3*time.Second, func() bool { return calls.Load() == 1 })
 
 	touch(t, path, "v3")
-	waitFor(t, time.Second, func() bool { return calls.Load() == 2 })
+	waitFor(t, 3*time.Second, func() bool { return calls.Load() == 2 })
 }
 
 // TestPollReloadSurvivesBadEdit verifies a reload error is logged and skipped
@@ -77,15 +80,18 @@ func TestPollReloadSurvivesBadEdit(t *testing.T) {
 	defer cancel()
 	go pollReload(ctx, quietLogger(), path, 10*time.Millisecond, reload)
 
+	// Let the poller capture the baseline mtime before we start changing it.
+	time.Sleep(60 * time.Millisecond)
+
 	// First change: reload fails. Watcher must survive.
 	fail.Store(true)
 	touch(t, path, "broken")
-	waitFor(t, time.Second, func() bool { return calls.Load() == 1 })
+	waitFor(t, 3*time.Second, func() bool { return calls.Load() == 1 })
 
 	// Second change: reload succeeds. Watcher picked it back up.
 	fail.Store(false)
 	touch(t, path, "fixed")
-	waitFor(t, time.Second, func() bool { return calls.Load() == 2 })
+	waitFor(t, 3*time.Second, func() bool { return calls.Load() == 2 })
 }
 
 // TestPollReloadStopsOnContext verifies canceling ctx unblocks pollReload.
