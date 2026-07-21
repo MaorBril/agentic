@@ -22,6 +22,7 @@ type streamState struct {
 	alias string
 
 	started      bool
+	sawChunk     bool   // a real upstream chunk arrived (vs synthetic keep-alive start)
 	index        int    // next content block index
 	openType     string // "", "thinking", "text", "tool"
 	openaiToolIx int    // openai tool_call index of the open tool block
@@ -49,6 +50,8 @@ func newStreamState(sse *anthropic.SSEWriter, alias string) *streamState {
 func (s *streamState) Run(ctx context.Context, body io.Reader) (anthropic.Usage, string) {
 	lines := make(chan []byte)
 	scanErr := make(chan error, 1)
+	quit := make(chan struct{}) // frees the reader if Run returns before EOF
+	defer close(quit)
 	go func() {
 		scanner := bufio.NewScanner(body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -57,6 +60,8 @@ func (s *streamState) Run(ctx context.Context, body io.Reader) (anthropic.Usage,
 			select {
 			case lines <- line:
 			case <-ctx.Done():
+				return
+			case <-quit:
 				return
 			}
 		}
@@ -79,16 +84,14 @@ func (s *streamState) Run(ctx context.Context, body io.Reader) (anthropic.Usage,
 				s.sse.ErrorEvent("api_error", "upstream stream: "+err.Error())
 				return s.usage, "api_error"
 			}
-			s.finalize()
-			return s.usage, ""
+			return s.usage, s.finalize()
 		case line := <-lines:
 			data, ok := bytes.CutPrefix(line, []byte("data: "))
 			if !ok {
 				continue
 			}
 			if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
-				s.finalize()
-				return s.usage, ""
+				return s.usage, s.finalize()
 			}
 			var chunk openai.Chunk
 			if err := json.Unmarshal(data, &chunk); err != nil {
@@ -131,6 +134,7 @@ func (s *streamState) startMessage(id string) {
 }
 
 func (s *streamState) handleChunk(chunk *openai.Chunk) {
+	s.sawChunk = true
 	s.startMessage("msg_" + chunk.ID)
 	if chunk.Usage != nil {
 		s.usage = mapUsage(chunk.Usage)
@@ -286,11 +290,16 @@ func (s *streamState) closeBlock() {
 	s.openToolID = ""
 }
 
-func (s *streamState) finalize() {
-	if !s.started {
-		// Upstream sent nothing usable.
+// finalize closes the stream grammar, returning a non-empty errType if the
+// stream ended without anything usable.
+func (s *streamState) finalize() string {
+	if !s.sawChunk {
+		// Upstream sent nothing usable. Checked against sawChunk, not
+		// started: a keep-alive ping may have opened the message
+		// synthetically, but an empty stream is still an error — Claude
+		// Code retries on the error event, not on an empty message.
 		s.sse.ErrorEvent("api_error", "upstream produced no chunks")
-		return
+		return "api_error"
 	}
 	s.closeBlock()
 	s.sse.Event("message_delta", map[string]any{
@@ -303,4 +312,5 @@ func (s *streamState) finalize() {
 		},
 	})
 	s.sse.Event("message_stop", map[string]any{"type": "message_stop"})
+	return ""
 }

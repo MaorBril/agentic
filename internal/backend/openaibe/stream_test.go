@@ -254,6 +254,30 @@ func TestStreamCancellation(t *testing.T) {
 	}
 }
 
+func TestStreamEmptyAfterKeepAlive(t *testing.T) {
+	// Upstream that goes quiet long enough for a keep-alive ping to open the
+	// message, then EOFs with zero chunks: still an error, not an empty
+	// message (Claude Code retries on the error event).
+	pr, pw := io.Pipe()
+	rec := httptest.NewRecorder()
+	state := newStreamState(anthropic.NewSSEWriter(rec), "gpt")
+	state.keepAliveEvery = 5 * time.Millisecond
+
+	done := make(chan string, 1)
+	go func() {
+		_, errType := state.Run(context.Background(), pr)
+		done <- errType
+	}()
+	time.Sleep(30 * time.Millisecond) // let a ping open the message
+	pw.Close()                        // EOF without a single chunk
+	if errType := <-done; errType != "api_error" {
+		t.Errorf("errType = %q, want api_error", errType)
+	}
+	if !strings.Contains(rec.Body.String(), "upstream produced no chunks") {
+		t.Errorf("expected no-chunks error event, got:\n%s", rec.Body.String())
+	}
+}
+
 func TestStreamKeepAliveBeforeFirstChunk(t *testing.T) {
 	// While the upstream is quiet before the first token, pings must flow so
 	// the client doesn't time out on a byte-silent connection.
