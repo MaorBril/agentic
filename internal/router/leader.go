@@ -125,6 +125,9 @@ func (m *Manager) lead(ctx context.Context, ln net.Listener) error {
 	srv := NewServer(cfg, m.Token, m.DataDir, st, m.Log)
 	httpSrv := &http.Server{Handler: srv.Handler()}
 
+	// Hot-reload on direct edits to ~/.agentic/config.yaml.
+	go watchConfig(ctx, srv, m.Log)
+
 	m.writeDiscovery()
 	defer m.removeDiscovery()
 
