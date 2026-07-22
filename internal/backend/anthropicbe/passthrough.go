@@ -99,7 +99,7 @@ func (b *Backend) forward(ctx context.Context, call *backend.Call, w http.Respon
 
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		res.Usage = copySSEWithUsageTee(resp.Body, w)
-		res.ReportedInput = inputSide(res.Usage)
+		res.ReportedInput = res.Usage.InputSide() // passthrough never scales
 		return res
 	}
 
@@ -110,16 +110,10 @@ func (b *Backend) forward(ctx context.Context, call *backend.Call, w http.Respon
 		}
 		json.Unmarshal(buf, &parsed)
 		res.Usage = parsed.Usage
-		res.ReportedInput = inputSide(res.Usage)
+		res.ReportedInput = res.Usage.InputSide()
 	}
 	w.Write(buf)
 	return res
-}
-
-// inputSide sums the input-side usage fields. Passthrough never scales, so
-// reported always equals true here.
-func inputSide(u anthropic.Usage) int64 {
-	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
 }
 
 // copySSEWithUsageTee streams the SSE body through untouched while watching

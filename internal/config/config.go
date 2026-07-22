@@ -215,6 +215,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: model %q effective_context %d exceeds context_window %d",
 				alias, m.EffectiveContext, m.ContextWindow)
 		}
+		// The anthropic backend is a byte-faithful passthrough — it never
+		// scales token counts, so these fields would be silently ignored.
+		if c.Providers[m.Provider].Type == ProviderAnthropic && m.ContextBudget() > 0 {
+			return fmt.Errorf("config: model %q: context_window/effective_context have no effect on anthropic providers (passthrough never scales) — remove them", alias)
+		}
 	}
 	for name, prof := range c.Profiles {
 		if prof.Passthrough {

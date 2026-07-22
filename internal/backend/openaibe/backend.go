@@ -78,7 +78,7 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 			status = 499
 		}
 		return backend.Result{Status: status, Usage: usage, ErrType: errType,
-			ReportedInput: inputSide(tokens.ScaleUsage(usage, scale))}
+			ReportedInput: tokens.ScaleUsage(usage, scale).InputSide()}
 	}
 
 	raw, err := io.ReadAll(resp.Body)
@@ -100,11 +100,7 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 	out.Usage = tokens.ScaleUsage(trueUsage, scale)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
-	return backend.Result{Status: 200, Usage: trueUsage, ReportedInput: inputSide(out.Usage)}
-}
-
-func inputSide(u anthropic.Usage) int64 {
-	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+	return backend.Result{Status: 200, Usage: trueUsage, ReportedInput: out.Usage.InputSide()}
 }
 
 // CountTokens has no OpenAI-dialect equivalent — serve a local estimate,

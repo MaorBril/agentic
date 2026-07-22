@@ -125,7 +125,7 @@ func TestContextScalingEval(t *testing.T) {
 
 // newScalingServer builds a router whose single model has the given context
 // sizing, backed by a fake OpenAI upstream that bills whatever
-// prompt_tokens the request's X-Eval-Prompt-Tokens JSON field asks for.
+// prompt_tokens a "bill me N" message in the conversation asks for.
 func newScalingServer(t *testing.T, window, effective int) (*httptest.Server, *store.Store) {
 	t.Helper()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

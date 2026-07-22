@@ -37,8 +37,13 @@ Defaults to the most recent session; find ids with 'agentic cost --by session'.`
 		sessionID := ""
 		if len(args) == 1 {
 			sessionID = args[0]
-		} else if sessionID, err = st.LatestSessionID(); err != nil || sessionID == "" {
-			return fmt.Errorf("no attributed sessions recorded yet (%v)", err)
+		} else {
+			if sessionID, err = st.LatestSessionID(); err != nil {
+				return err
+			}
+			if sessionID == "" {
+				return fmt.Errorf("no attributed sessions recorded yet")
+			}
 		}
 		traj, err := st.ContextTrajectory(sessionID)
 		if err != nil {

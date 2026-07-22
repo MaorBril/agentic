@@ -84,6 +84,12 @@ providers:
 models:
   m: {provider: local, id: foo, context_window: -1}
 `,
+		"context fields on anthropic provider (passthrough never scales)": `
+providers:
+  anthropic: {type: anthropic, base_url: https://api.anthropic.com}
+models:
+  m: {provider: anthropic, id: claude-sonnet-5, effective_context: 60000}
+`,
 	}
 	for name, yaml := range cases {
 		if _, err := Parse([]byte(yaml)); err == nil {

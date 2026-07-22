@@ -127,6 +127,12 @@ GROUP BY model, decile ORDER BY model, decile;
 ## Known limitations
 
 - The gauge jump on tier switches (above).
+- **The 200K assumption depends on your alias names.** Claude Code sees
+  the alias verbatim (via `ANTHROPIC_MODEL`) and assumes ~200K for names
+  it doesn't recognize — which is what the scaling targets. An alias that
+  matches a real Claude model id (or contains `[1m]`) makes Claude Code
+  assume that model's window instead, silently breaking the mapping.
+  Don't name aliases after real Claude model ids.
 - `count_tokens` for translated models is an estimate (~3.5 chars/token,
   +10% margin), not a tokenizer. Scaling preserves the bias but also
   scales the estimation error; on very small budgets (≤8K) the margin can
