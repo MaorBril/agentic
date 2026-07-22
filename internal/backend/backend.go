@@ -24,12 +24,17 @@ type Call struct {
 	Query    url.Values
 }
 
-// Result is what a backend reports after serving a call.
+// Result is what a backend reports after serving a call. Usage is always
+// TRUE upstream usage — pricing and budgets never see scaled numbers.
 type Result struct {
 	Usage   anthropic.Usage
 	Status  int
 	ErrType string // empty on success
 	ErrMsg  string // short upstream error message, for the router log
+	// ReportedInput is the input-side token total (input + cache read +
+	// cache write) as reported to the client after context scaling. Equal
+	// to the true total when no scaling applied; 0 when nothing reported.
+	ReportedInput int64
 }
 
 type Backend interface {

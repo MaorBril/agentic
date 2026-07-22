@@ -83,6 +83,29 @@ type Model struct {
 	// (Claude Code asks for 32K+; many models cap lower).
 	MaxOutput int    `yaml:"max_output"`
 	Pricing   *Price `yaml:"pricing"`
+	// ContextWindow is the model's nominal input context window in tokens.
+	// Claude Code assumes ~200K; when the real window differs, the router
+	// scales reported token counts so auto-compact fires at the right
+	// relative fullness (see internal/tokens/scale.go).
+	ContextWindow int `yaml:"context_window"`
+	// EffectiveContext caps the usable context below the nominal window —
+	// an attention budget for models that degrade well before their
+	// advertised limit. Unset means the full window is usable.
+	EffectiveContext int `yaml:"effective_context"`
+}
+
+// ContextBudget is the number of input tokens the model can usefully hold:
+// the smaller of ContextWindow and EffectiveContext, considering only set
+// fields. 0 means unknown (no scaling applied).
+func (m Model) ContextBudget() int {
+	switch {
+	case m.ContextWindow > 0 && m.EffectiveContext > 0:
+		return min(m.ContextWindow, m.EffectiveContext)
+	case m.EffectiveContext > 0:
+		return m.EffectiveContext
+	default:
+		return m.ContextWindow
+	}
 }
 
 type Profile struct {
@@ -184,6 +207,13 @@ func (c *Config) Validate() error {
 		case "", "none", "effort", "passive":
 		default:
 			return fmt.Errorf("config: model %q has unknown reasoning %q", alias, m.Reasoning)
+		}
+		if m.ContextWindow < 0 || m.EffectiveContext < 0 {
+			return fmt.Errorf("config: model %q has negative context size", alias)
+		}
+		if m.ContextWindow > 0 && m.EffectiveContext > m.ContextWindow {
+			return fmt.Errorf("config: model %q effective_context %d exceeds context_window %d",
+				alias, m.EffectiveContext, m.ContextWindow)
 		}
 	}
 	for name, prof := range c.Profiles {

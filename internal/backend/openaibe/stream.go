@@ -10,6 +10,7 @@ import (
 
 	"github.com/maorbril/agentic/internal/anthropic"
 	"github.com/maorbril/agentic/internal/openai"
+	"github.com/maorbril/agentic/internal/tokens"
 )
 
 // streamState turns an OpenAI chunk stream into the exact Anthropic SSE
@@ -34,12 +35,13 @@ type streamState struct {
 
 	finishReason   string
 	sawToolCall    bool
-	usage          anthropic.Usage
-	keepAliveEvery time.Duration // ping cadence while the upstream is quiet
+	usage          anthropic.Usage // true upstream usage; scaled only at emit time
+	scale          float64         // context-scaling factor for client-facing usage
+	keepAliveEvery time.Duration   // ping cadence while the upstream is quiet
 }
 
 func newStreamState(sse *anthropic.SSEWriter, alias string) *streamState {
-	return &streamState{sse: sse, alias: alias, openaiToolIx: -1, keepAliveEvery: 15 * time.Second}
+	return &streamState{sse: sse, alias: alias, openaiToolIx: -1, scale: 1, keepAliveEvery: 15 * time.Second}
 }
 
 // Run consumes the upstream SSE body until EOF, [DONE], or ctx cancellation,
@@ -302,13 +304,14 @@ func (s *streamState) finalize() string {
 		return "api_error"
 	}
 	s.closeBlock()
+	reported := tokens.ScaleUsage(s.usage, s.scale)
 	s.sse.Event("message_delta", map[string]any{
 		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": mapFinishReason(s.finishReason, s.sawToolCall), "stop_sequence": nil},
 		"usage": map[string]int64{
-			"input_tokens":            s.usage.InputTokens,
-			"output_tokens":           s.usage.OutputTokens,
-			"cache_read_input_tokens": s.usage.CacheReadInputTokens,
+			"input_tokens":            reported.InputTokens,
+			"output_tokens":           reported.OutputTokens,
+			"cache_read_input_tokens": reported.CacheReadInputTokens,
 		},
 	})
 	s.sse.Event("message_stop", map[string]any{"type": "message_stop"})

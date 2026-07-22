@@ -4,6 +4,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -87,7 +88,22 @@ CREATE TABLE IF NOT EXISTS goal_decisions (
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_events(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	// Additive columns for existing databases. ctx_budget is the routed
+	// model's context budget at request time; reported_input is the
+	// (possibly scaled) input-side total sent to the client — together they
+	// make context-scaling behavior queryable per session.
+	for _, col := range []string{
+		"ALTER TABLE usage_events ADD COLUMN ctx_budget INTEGER DEFAULT 0",
+		"ALTER TABLE usage_events ADD COLUMN reported_input INTEGER DEFAULT 0",
+	} {
+		if _, err := s.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	return nil
 }
 
 type UsageEvent struct {
@@ -106,17 +122,20 @@ type UsageEvent struct {
 	RequestID        string
 	Status           int
 	ErrType          string
+	CtxBudget        int   // model's context budget (0 = unknown/unscaled)
+	ReportedInput    int64 // input-side tokens as reported to the client
 }
 
 func (s *Store) RecordUsage(e UsageEvent) error {
 	_, err := s.db.Exec(`INSERT INTO usage_events
 (ts, session_id, profile, provider, model, model_alias,
  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
- cost_usd, priced, request_id, status, err_type)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+ cost_usd, priced, request_id, status, err_type, ctx_budget, reported_input)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		e.TS.Unix(), e.SessionID, e.Profile, e.Provider, e.Model, e.Alias,
 		e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens,
-		e.CostUSD, boolToInt(e.Priced), e.RequestID, e.Status, e.ErrType)
+		e.CostUSD, boolToInt(e.Priced), e.RequestID, e.Status, e.ErrType,
+		e.CtxBudget, e.ReportedInput)
 	return err
 }
 
@@ -173,6 +192,56 @@ func (s *Store) LatestGoalDecision(sessionID string) (goal bool, reason string, 
 		return false, "", false, nil
 	}
 	return g != 0, reason, err == nil, err
+}
+
+// ContextEvent is one request's context-fullness datapoint: how full the
+// routed model really was vs what the client was told. The research surface
+// for tuning context_window/effective_context.
+type ContextEvent struct {
+	TS            time.Time
+	Model         string
+	TrueInput     int64 // input + cache read + cache write, as billed
+	ReportedInput int64 // what the client's context gauge saw
+	CtxBudget     int   // model budget at request time (0 = unscaled)
+	Status        int
+	ErrType       string
+}
+
+// ContextTrajectory returns a session's per-request context datapoints in
+// time order. A drop in TrueInput between consecutive rows is a compaction.
+func (s *Store) ContextTrajectory(sessionID string) ([]ContextEvent, error) {
+	rows, err := s.db.Query(`SELECT ts, model,
+  COALESCE(input_tokens,0)+COALESCE(cache_read_tokens,0)+COALESCE(cache_write_tokens,0),
+  COALESCE(reported_input,0), COALESCE(ctx_budget,0), status, COALESCE(err_type,'')
+FROM usage_events WHERE session_id = ? ORDER BY ts, id`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ContextEvent
+	for rows.Next() {
+		var e ContextEvent
+		var ts int64
+		if err := rows.Scan(&ts, &e.Model, &e.TrueInput, &e.ReportedInput, &e.CtxBudget, &e.Status, &e.ErrType); err != nil {
+			return nil, err
+		}
+		e.TS = time.Unix(ts, 0)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// LatestSessionID returns the session with the most recent usage event, or
+// "" when nothing attributed has been recorded.
+func (s *Store) LatestSessionID() (string, error) {
+	row := s.db.QueryRow(`SELECT session_id FROM usage_events
+WHERE session_id != '' ORDER BY ts DESC, id DESC LIMIT 1`)
+	var id string
+	err := row.Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return id, err
 }
 
 // SpendRow is one line of a cost report.

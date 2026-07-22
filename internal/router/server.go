@@ -193,6 +193,7 @@ func (s *Server) recordUsage(r *http.Request, route config.Resolved, alias strin
 	}
 	cost, priced := s.pricing.Load().Cost(route.Model.ID,
 		u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
+	budget := route.Model.ContextBudget()
 	ev := store.UsageEvent{
 		TS:               time.Now(),
 		SessionID:        r.Header.Get("X-Agentic-Session"),
@@ -209,6 +210,8 @@ func (s *Server) recordUsage(r *http.Request, route config.Resolved, alias strin
 		RequestID:        r.Header.Get("request-id"),
 		Status:           res.Status,
 		ErrType:          res.ErrType,
+		CtxBudget:        budget,
+		ReportedInput:    res.ReportedInput,
 	}
 	if err := s.store.RecordUsage(ev); err != nil {
 		s.log.Warn("usage insert failed", "err", err)
@@ -218,11 +221,20 @@ func (s *Server) recordUsage(r *http.Request, route config.Resolved, alias strin
 		s.log.Warn("upstream error",
 			"model", alias, "upstream", route.Model.ID, "status", res.Status, "err", res.ErrMsg)
 	}
-	s.log.Info("request",
+	attrs := []any{
 		"model", alias, "upstream", route.Model.ID, "status", res.Status,
 		"in", u.InputTokens, "out", u.OutputTokens,
 		"cache_read", u.CacheReadInputTokens, "cost_usd", fmt.Sprintf("%.4f", cost),
-		"ms", dur.Milliseconds())
+		"ms", dur.Milliseconds(),
+	}
+	if budget > 0 {
+		trueIn := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+		attrs = append(attrs,
+			"ctx_budget", budget,
+			"ctx_reported", res.ReportedInput,
+			"ctx_pct", fmt.Sprintf("%.1f", 100*float64(trueIn)/float64(budget)))
+	}
+	s.log.Info("request", attrs...)
 }
 
 // handleCatchAll forwards unrecognized /v1/* calls to the default
