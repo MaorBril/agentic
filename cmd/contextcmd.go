@@ -59,9 +59,12 @@ Defaults to the most recent session; find ids with 'agentic cost --by session'.`
 		fmt.Printf("Session %s — %d requests\n", sessionID, len(traj))
 		fmt.Printf("%-6s %-24s %9s %9s %9s  %s\n", "time", "model", "true", "reported", "budget", "fullness")
 		var prevTrue int64
-		for i, e := range traj {
+		for _, e := range traj {
 			marker := ""
-			if i > 0 && prevTrue > 0 && e.TrueInput < prevTrue/2 {
+			// A drop between successful requests is a compaction. The system
+			// prompt is a large constant floor, so even a full compact only
+			// drops the total by a modest fraction — flag any >10% dip.
+			if e.TrueInput > 0 && prevTrue > 0 && float64(e.TrueInput) < 0.9*float64(prevTrue) {
 				marker = "  ← compacted"
 			}
 			if e.ErrType != "" {
@@ -76,7 +79,9 @@ Defaults to the most recent session; find ids with 'agentic cost --by session'.`
 				e.TS.Format("15:04"), e.Model,
 				humanTokens(e.TrueInput), humanTokens(e.ReportedInput), humanTokens(int64(e.CtxBudget)),
 				fullness, marker)
-			prevTrue = e.TrueInput
+			if e.TrueInput > 0 {
+				prevTrue = e.TrueInput // zero-usage error rows aren't a baseline
+			}
 		}
 		fmt.Printf("\nassumed window %s: the client compacts against that; 'true' is what the model really held.\n",
 			humanTokens(tokens.AssumedWindow))

@@ -127,12 +127,32 @@ GROUP BY model, decile ORDER BY model, decile;
 ## Known limitations
 
 - The gauge jump on tier switches (above).
-- **The 200K assumption depends on your alias names.** Claude Code sees
-  the alias verbatim (via `ANTHROPIC_MODEL`) and assumes ~200K for names
-  it doesn't recognize — which is what the scaling targets. An alias that
-  matches a real Claude model id (or contains `[1m]`) makes Claude Code
-  assume that model's window instead, silently breaking the mapping.
-  Don't name aliases after real Claude model ids.
+- **Auto-compact only engages for model ids Claude Code recognizes.**
+  Measured live (Claude Code 2.x, July 2026): with an unknown alias name
+  in `ANTHROPIC_MODEL` (`glm`, `qwen`), the client applies *no* context
+  limit at all — it neither compacts nor refuses, at any reported
+  fullness. With a recognized ~200K id it compacts automatically when the
+  last reported input-side total crosses the window, and refuses
+  ("Prompt is too long") rather than sending past it. To get client-side
+  compaction on a scaled model, alias it *as* a 200K Claude id — an
+  explicit model entry overrides the built-in `claude-*` passthrough:
+
+  ```yaml
+  models:
+    claude-sonnet-5: {provider: local, id: qwen3-coder-30b, context_window: 32768}
+  ```
+
+  Avoid ids Claude Code treats as 1M (`[1m]` variants). Unknown aliases
+  still get correct *reporting* (gauge, statusline, `agentic context`) —
+  they just won't trigger the client's compaction machinery.
+- **Leave real headroom under the trigger.** The observed trigger is the
+  full assumed window (~200K reported), not the ~92% warning line — so at
+  trigger time the model is at ~100% of its *budget*. Two things keep that
+  safe: the estimator's deliberate over-count (observed ~+15–25% vs real
+  tokenizers) means the trigger fires while true usage is still below
+  budget, and `effective_context` set below the nominal window keeps the
+  budget itself short of the hard limit. Live run: budget 55K on a 128K
+  window compacted at 48K true (88% of budget, 37% of the real window).
 - `count_tokens` for translated models is an estimate (~3.5 chars/token,
   +10% margin), not a tokenizer. Scaling preserves the bias but also
   scales the estimation error; on very small budgets (≤8K) the margin can

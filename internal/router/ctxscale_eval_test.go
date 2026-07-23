@@ -17,8 +17,10 @@ import (
 	"github.com/maorbril/agentic/internal/tokens"
 )
 
-// compactAt mirrors Claude Code's auto-compact trigger: it compacts when
-// the context gauge reaches ~92% of the window it believes it has.
+// compactAt is the simulated auto-compact trigger, as a fraction of the
+// window the client believes it has. (Live measurement, July 2026: Claude
+// Code triggers at ~100%; its warning line sits near 92%. The invariants
+// below are threshold-agnostic — proportionality holds at any trigger.)
 const compactAt = 0.92
 
 // TestContextScalingEval is the simulation eval for virtual context

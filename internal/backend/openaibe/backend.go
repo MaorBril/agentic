@@ -72,6 +72,7 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 		sse := anthropic.NewSSEWriter(w)
 		state := newStreamState(sse, call.Envelope.Model)
 		state.scale = scale
+		state.estInput = tokens.ScaleCount(tokens.Estimate(req), scale)
 		usage, errType := state.Run(ctx, resp.Body)
 		status := 200
 		if errType == "client_disconnect" {

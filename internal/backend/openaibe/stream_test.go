@@ -327,6 +327,7 @@ func TestStreamUsageContextScaling(t *testing.T) {
 	rec := httptest.NewRecorder()
 	state := newStreamState(anthropic.NewSSEWriter(rec), "qwen")
 	state.scale = 200_000.0 / 32_000.0 // 32K-budget model
+	state.estInput = 51000             // scaled request estimate, emitted in message_start
 	body := "data: " + `{"id":"c1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}` + "\n\n" +
 		"data: " + `{"id":"c1","choices":[],"usage":{"prompt_tokens":16000,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":8000}}}` + "\n\n" +
 		"data: [DONE]\n\n"
@@ -340,6 +341,14 @@ func TestStreamUsageContextScaling(t *testing.T) {
 	evs := parseEvents(t, rec.Body.String())
 	var delta map[string]any
 	for _, e := range evs {
+		if e.name == "message_start" {
+			// The context gauge reads input from message_start — it must
+			// carry the scaled estimate, not zero.
+			start := e.data["message"].(map[string]any)["usage"].(map[string]any)
+			if start["input_tokens"].(float64) != 51000 {
+				t.Errorf("message_start input_tokens = %v, want 51000", start["input_tokens"])
+			}
+		}
 		if e.name == "message_delta" {
 			delta = e.data["usage"].(map[string]any)
 		}

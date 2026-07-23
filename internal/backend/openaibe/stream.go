@@ -37,6 +37,7 @@ type streamState struct {
 	sawToolCall    bool
 	usage          anthropic.Usage // true upstream usage; scaled only at emit time
 	scale          float64         // context-scaling factor for client-facing usage
+	estInput       int64           // scaled input estimate for message_start (see startMessage)
 	keepAliveEvery time.Duration   // ping cadence while the upstream is quiet
 }
 
@@ -120,6 +121,11 @@ func (s *streamState) ping() {
 }
 
 // startMessage emits message_start + ping once; later calls are no-ops.
+// Claude Code's context gauge reads input tokens from message_start's usage
+// (the Anthropic API reports them there), NOT from message_delta — with a
+// zero here, auto-compact never fires on translated models. OpenAI upstreams
+// only report usage in the final chunk, so message_start carries the local
+// (scaled, bias-high) estimate and message_delta the true scaled numbers.
 func (s *streamState) startMessage(id string) {
 	if s.started {
 		return
@@ -130,6 +136,7 @@ func (s *streamState) startMessage(id string) {
 		"message": anthropic.MessagesResponse{
 			ID: id, Type: "message", Role: "assistant",
 			Model: s.alias, Content: []anthropic.ContentBlock{},
+			Usage: anthropic.Usage{InputTokens: s.estInput},
 		},
 	})
 	s.sse.Ping()
