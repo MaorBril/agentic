@@ -72,12 +72,49 @@ default_profile: ghost
 modles:
   m: {provider: x, id: foo}
 `,
+		"effective_context above context_window": `
+providers:
+  local: {type: openai, base_url: http://x}
+models:
+  m: {provider: local, id: foo, context_window: 32000, effective_context: 64000}
+`,
+		"negative context_window": `
+providers:
+  local: {type: openai, base_url: http://x}
+models:
+  m: {provider: local, id: foo, context_window: -1}
+`,
+		"context fields on anthropic provider (passthrough never scales)": `
+providers:
+  anthropic: {type: anthropic, base_url: https://api.anthropic.com}
+models:
+  m: {provider: anthropic, id: claude-sonnet-5, effective_context: 60000}
+`,
 	}
 	for name, yaml := range cases {
 		if _, err := Parse([]byte(yaml)); err == nil {
 			t.Errorf("%s: expected error", name)
 		} else if !strings.Contains(err.Error(), "config") && !strings.Contains(err.Error(), "field") {
 			t.Logf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestContextBudget(t *testing.T) {
+	cases := []struct {
+		name string
+		m    Model
+		want int
+	}{
+		{"unset", Model{}, 0},
+		{"window only", Model{ContextWindow: 128000}, 128000},
+		{"effective only", Model{EffectiveContext: 60000}, 60000},
+		{"effective caps window", Model{ContextWindow: 200000, EffectiveContext: 60000}, 60000},
+		{"equal", Model{ContextWindow: 32000, EffectiveContext: 32000}, 32000},
+	}
+	for _, tc := range cases {
+		if got := tc.m.ContextBudget(); got != tc.want {
+			t.Errorf("%s: ContextBudget() = %d, want %d", tc.name, got, tc.want)
 		}
 	}
 }

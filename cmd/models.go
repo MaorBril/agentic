@@ -37,7 +37,7 @@ var modelsListCmd = &cobra.Command{
 		}
 		prices := pricing.Load(dataDir, cfg)
 		tw := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "ALIAS\tPROVIDER\tUPSTREAM MODEL\t$IN/MTok\t$OUT/MTok\tKEY")
+		fmt.Fprintln(tw, "ALIAS\tPROVIDER\tUPSTREAM MODEL\tCTX\t$IN/MTok\t$OUT/MTok\tKEY")
 		aliases := make([]string, 0, len(cfg.Models))
 		for a := range cfg.Models {
 			aliases = append(aliases, a)
@@ -54,7 +54,14 @@ var modelsListCmd = &cobra.Command{
 			if p.APIKeyEnv != "" && p.Key() == "" {
 				key = "✗ (" + p.APIKeyEnv + " unavailable)"
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", a, m.Provider, m.ID, priceIn, priceOut, key)
+			ctx := "-"
+			if b := m.ContextBudget(); b > 0 {
+				ctx = humanTokens(int64(b))
+				if m.EffectiveContext > 0 && m.EffectiveContext < m.ContextWindow {
+					ctx += " (of " + humanTokens(int64(m.ContextWindow)) + ")"
+				}
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a, m.Provider, m.ID, ctx, priceIn, priceOut, key)
 		}
 		return tw.Flush()
 	},
@@ -65,6 +72,8 @@ var (
 	modelID        string
 	modelReasoning string
 	modelMaxOutput int
+	modelCtxWindow int
+	modelEffective int
 )
 
 var modelsAddCmd = &cobra.Command{
@@ -84,6 +93,12 @@ var modelsAddCmd = &cobra.Command{
 		}
 		if modelMaxOutput > 0 {
 			snippet += fmt.Sprintf("max_output: %d\n", modelMaxOutput)
+		}
+		if modelCtxWindow > 0 {
+			snippet += fmt.Sprintf("context_window: %d\n", modelCtxWindow)
+		}
+		if modelEffective > 0 {
+			snippet += fmt.Sprintf("effective_context: %d\n", modelEffective)
 		}
 		return editConfig(func(doc *config.Doc) error {
 			return doc.SetSubtree("models", args[0], snippet)
@@ -224,5 +239,7 @@ func init() {
 	modelsAddCmd.Flags().StringVar(&modelID, "id", "", "upstream model id")
 	modelsAddCmd.Flags().StringVar(&modelReasoning, "reasoning", "", "none | effort | passive")
 	modelsAddCmd.Flags().IntVar(&modelMaxOutput, "max-output", 0, "clamp max_tokens to this output cap")
+	modelsAddCmd.Flags().IntVar(&modelCtxWindow, "context-window", 0, "model's real input context window in tokens")
+	modelsAddCmd.Flags().IntVar(&modelEffective, "effective-context", 0, "usable context before quality degrades (attention budget)")
 	modelsCmd.AddCommand(modelsListCmd, modelsAddCmd, modelsRemoveCmd, modelsTestCmd, modelsUpdatePricesCmd)
 }

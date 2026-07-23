@@ -59,7 +59,7 @@ func init() {
 	rootCmd.Flags().StringVar(&flagName, "name", "", "instance name (forwarded to clauder)")
 	rootCmd.Flags().BoolVar(&flagNoClauder, "no-clauder", false, "launch bare claude even if clauder is installed")
 	rootCmd.Flags().BoolVar(&flagPassthrough, "passthrough", false, "skip the router (subscription billing, no tracking)")
-	rootCmd.AddCommand(routerCmd, costCmd, modelsCmd, setupCmd)
+	rootCmd.AddCommand(routerCmd, costCmd, modelsCmd, setupCmd, contextCmd)
 }
 
 func Execute() {

@@ -126,6 +126,17 @@ Claude Code decides whether to act on it — the reminder is a nudge, not a comm
 
 This rides on the same classifier alias as dynamic routing, so it's on wherever `routing: auto` is configured, at the cost of one extra cheap classifier call per new turn alongside the tier call.
 
+## Context scaling
+
+Claude Code sizes its auto-compact against the ~200K window of the Claude model it thinks it's talking to. Routed models rarely match that: a local qwen holds 32K, GPT holds 400K, and many models get unreliable well before their advertised limit. Declare what a model really holds and the router scales every token count it reports so the client's context gauge — and therefore auto-compact — tracks the *real* window:
+
+```bash
+agentic models add qwen --provider local --id qwen3-coder-30b --context-window 32768
+agentic models add glm  --provider z --id glm-4.7 --context-window 200000 --effective-context 60000
+```
+
+`effective_context` is the attention knob: the client compacts at 60K real tokens even though the window is nominally 200K, keeping the model in its coherent range. Pricing and budgets always record true usage; `agentic context` shows a session's true-vs-reported trajectory for tuning these numbers. Details and research methodology: [docs/context-scaling.md](docs/context-scaling.md).
+
 ## Budgets
 
 Daily, weekly, and monthly caps — global and per profile. When a cap is hit, the router refuses the *next* request with a clear message that shows up right in the Claude Code TUI; in-flight responses are never cut. Warnings surface in the statusline (`agentic setup` registers it), which shows live session and daily spend:
@@ -141,7 +152,7 @@ main · sonnet · sess $0.84 · day $4.31/$25 [██░░░░]
 Two things you should understand before routing through agentic:
 
 - **Billing.** Traffic through the router is billed to **API keys**, not your Claude Pro/Max subscription. OAuth credentials are never proxied. For subscription billing, use a `passthrough: true` profile — normal claude, no tracking.
-- **Fidelity.** Non-Anthropic models work through translation, but Claude Code's prompts and tool patterns are tuned for Claude, so expect them to be clunkier in the main loop. They shine as cheap workhorses for background tasks and subagents. Specific gaps: no prompt caching on OpenAI-dialect backends (provider-side implicit caching still shows up as cache reads), thinking blocks are display-only, Anthropic server tools (web search, code execution) are unavailable on translated models, `top_k` is dropped, stop sequences truncate to four, and token counting for translated models is a deliberate ~15% overestimate so auto-compact fires early instead of overflowing context. Set `max_output` on models whose output cap is below what Claude Code requests (it asks for 32K).
+- **Fidelity.** Non-Anthropic models work through translation, but Claude Code's prompts and tool patterns are tuned for Claude, so expect them to be clunkier in the main loop. They shine as cheap workhorses for background tasks and subagents. Specific gaps: no prompt caching on OpenAI-dialect backends (provider-side implicit caching still shows up as cache reads), thinking blocks are display-only, Anthropic server tools (web search, code execution) are unavailable on translated models, `top_k` is dropped, stop sequences truncate to four, and token counting for translated models is a deliberate ~15% overestimate so auto-compact fires early instead of overflowing context. Set `max_output` on models whose output cap is below what Claude Code requests (it asks for 32K), and `context_window` on models whose window differs from the ~200K Claude Code assumes (see [Context scaling](#context-scaling)).
 
 ## Works with clauder
 
@@ -154,6 +165,7 @@ If [clauder](https://github.com/MaorBril/clauder) is installed, agentic launches
 | `agentic [-p profile] [--model alias] [-- args]` | launch Claude Code (args after `--` go to claude) |
 | `agentic setup` | first-run config, token, statusline registration |
 | `agentic cost [--week\|--month] [--by model\|profile\|session]` | spend report |
+| `agentic context [session-id]` | context-fullness trajectory (true vs reported tokens) |
 | `agentic models add/list/remove/test/update-prices` | model aliases |
 | `agentic providers add/list/remove` | upstream providers |
 | `agentic profiles list/show` · `agentic budget set` | profiles and caps |

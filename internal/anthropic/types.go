@@ -25,6 +25,11 @@ type Usage struct {
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 }
 
+// InputSide sums the input-side fields — what a context gauge counts.
+func (u Usage) InputSide() int64 {
+	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+}
+
 type CountTokensResponse struct {
 	InputTokens int64 `json:"input_tokens"`
 }

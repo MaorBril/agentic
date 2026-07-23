@@ -99,6 +99,7 @@ func (b *Backend) forward(ctx context.Context, call *backend.Call, w http.Respon
 
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		res.Usage = copySSEWithUsageTee(resp.Body, w)
+		res.ReportedInput = res.Usage.InputSide() // passthrough never scales
 		return res
 	}
 
@@ -109,6 +110,7 @@ func (b *Backend) forward(ctx context.Context, call *backend.Call, w http.Respon
 		}
 		json.Unmarshal(buf, &parsed)
 		res.Usage = parsed.Usage
+		res.ReportedInput = res.Usage.InputSide()
 	}
 	w.Write(buf)
 	return res

@@ -66,15 +66,20 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 		return writeUpstreamError(w, resp, call.Route.ProviderName, call.Route.Model.ID)
 	}
 
+	scale := tokens.ScaleFactor(call.Route.Model.ContextBudget())
+
 	if req.Stream {
 		sse := anthropic.NewSSEWriter(w)
 		state := newStreamState(sse, call.Envelope.Model)
+		state.scale = scale
+		state.estInput = tokens.ScaleCount(tokens.Estimate(req), scale)
 		usage, errType := state.Run(ctx, resp.Body)
 		status := 200
 		if errType == "client_disconnect" {
 			status = 499
 		}
-		return backend.Result{Status: status, Usage: usage, ErrType: errType}
+		return backend.Result{Status: status, Usage: usage, ErrType: errType,
+			ReportedInput: tokens.ScaleUsage(usage, scale).InputSide()}
 	}
 
 	raw, err := io.ReadAll(resp.Body)
@@ -92,20 +97,25 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 		anthropic.WriteError(w, 500, "api_error", "agentic translate: "+err.Error())
 		return backend.Result{Status: 502, ErrType: "api_error"}
 	}
+	trueUsage := out.Usage
+	out.Usage = tokens.ScaleUsage(trueUsage, scale)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
-	return backend.Result{Status: 200, Usage: out.Usage}
+	return backend.Result{Status: 200, Usage: trueUsage, ReportedInput: out.Usage.InputSide()}
 }
 
-// CountTokens has no OpenAI-dialect equivalent — serve a local estimate.
+// CountTokens has no OpenAI-dialect equivalent — serve a local estimate,
+// scaled to the model's context budget so Claude Code's auto-compact
+// threshold tracks the real window.
 func (b *Backend) CountTokens(ctx context.Context, call *backend.Call, w http.ResponseWriter) backend.Result {
 	req, err := anthropic.ParseRequest(call.Raw)
 	if err != nil {
 		anthropic.WriteError(w, 400, "invalid_request_error", "agentic: "+err.Error())
 		return backend.Result{Status: 400, ErrType: "invalid_request_error"}
 	}
+	n := tokens.ScaleCount(tokens.Estimate(req), tokens.ScaleFactor(call.Route.Model.ContextBudget()))
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(anthropic.CountTokensResponse{InputTokens: tokens.Estimate(req)})
+	json.NewEncoder(w).Encode(anthropic.CountTokensResponse{InputTokens: n})
 	return backend.Result{Status: 200}
 }
 

@@ -320,3 +320,47 @@ func TestStreamKeepAliveBeforeFirstChunk(t *testing.T) {
 		t.Errorf("message_start emitted %d times", startCount)
 	}
 }
+
+// Context scaling: the client-facing message_delta usage is scaled to the
+// model's context budget, while Run returns TRUE usage for pricing.
+func TestStreamUsageContextScaling(t *testing.T) {
+	rec := httptest.NewRecorder()
+	state := newStreamState(anthropic.NewSSEWriter(rec), "qwen")
+	state.scale = 200_000.0 / 32_000.0 // 32K-budget model
+	state.estInput = 51000             // scaled request estimate, emitted in message_start
+	body := "data: " + `{"id":"c1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}` + "\n\n" +
+		"data: " + `{"id":"c1","choices":[],"usage":{"prompt_tokens":16000,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":8000}}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	usage, errType := state.Run(context.Background(), strings.NewReader(body))
+	if errType != "" {
+		t.Fatalf("errType=%q", errType)
+	}
+	if usage.InputTokens != 8000 || usage.CacheReadInputTokens != 8000 || usage.OutputTokens != 50 {
+		t.Errorf("true usage = %+v", usage)
+	}
+	evs := parseEvents(t, rec.Body.String())
+	var delta map[string]any
+	for _, e := range evs {
+		if e.name == "message_start" {
+			// The context gauge reads input from message_start — it must
+			// carry the scaled estimate, not zero.
+			start := e.data["message"].(map[string]any)["usage"].(map[string]any)
+			if start["input_tokens"].(float64) != 51000 {
+				t.Errorf("message_start input_tokens = %v, want 51000", start["input_tokens"])
+			}
+		}
+		if e.name == "message_delta" {
+			delta = e.data["usage"].(map[string]any)
+		}
+	}
+	// 8000 non-cached input at half the 32K budget → 50000 reported (×6.25).
+	if delta["input_tokens"].(float64) != 50000 {
+		t.Errorf("reported input_tokens = %v, want 50000", delta["input_tokens"])
+	}
+	if delta["cache_read_input_tokens"].(float64) != 50000 {
+		t.Errorf("reported cache_read = %v, want 50000", delta["cache_read_input_tokens"])
+	}
+	if delta["output_tokens"].(float64) != 50 {
+		t.Errorf("output must stay true, got %v", delta["output_tokens"])
+	}
+}
