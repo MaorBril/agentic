@@ -63,10 +63,32 @@ Rules of the lie:
 With `model: auto`, different turns land on models with different budgets.
 The gauge is always relative to the *current* model, so it can jump when
 the tier changes — a conversation at 30% of opus's budget may be 90% of a
-local model's. That jump is correct (it reflects real headroom) but it
-means a light-tier turn can trigger a compact a deep-tier turn wouldn't.
-Deterministic size-aware tier filtering (don't route a conversation to a
-model it doesn't fit) is Phase 3, not yet implemented.
+local model's. That jump is correct (it reflects real headroom).
+
+**Size-aware tier selection.** Before classifying, the router estimates the
+request's input size and filters out any tier whose budget can't hold input
+plus reserved output headroom. The classifier then runs over the survivors;
+if its pick was filtered out, it's remapped upward to the smallest tier that
+still fits. A mid-turn continuation that outgrew its tier is remapped the
+same way and pinned, so the rest of the turn stays on the larger tier. When
+only one tier fits, the classifier call is skipped entirely. Tiers without a
+declared `context_window` are treated as infinite (always eligible) — so a
+mix of sized and unsized models works, and all-anthropic routing is
+unaffected.
+
+**Dispatch guard.** Whatever the router settles on, a pre-dispatch check
+catches the hard-overflow case: if the resolved model has a known budget and
+the estimated input exceeds it (plus headroom), the request is refused with a
+`400 invalid_request_error` ("request too large for model context budget")
+before it reaches upstream — instead of a mangled, provider-specific failure.
+Claude Code treats the 400 as a terminal error (no retry-spin), which is why
+it's used over 413/429. The guard is skipped for `count_tokens` and for
+models with an unknown budget.
+
+Both behaviors are observable: the router logs `autoroute_size` (Debug) with
+the estimate, required tokens, excluded tiers, and the remap; `route_decisions`
+gains a `reason` column (`size:light→standard`, `size:sticky:light→standard`)
+visible via the statusline and `agentic context`.
 
 ## Evaluating it
 

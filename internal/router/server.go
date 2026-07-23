@@ -45,7 +45,7 @@ func NewServer(cfg *config.Config, token, dataDir string, st *store.Store, logge
 	s.cfg.Store(cfg)
 	s.pricing.Store(pricing.Load(dataDir, cfg))
 	s.gate = budget.NewGate(cfg, st, logger)
-	s.auto = &autoRouter{classify: s.classifyViaBackend, cache: map[string]decision{}}
+	s.auto = &autoRouter{classify: s.classifyViaBackend, cache: map[string]decision{}, log: logger}
 	s.goal = &goalRouter{classify: s.classifyGoalViaBackend}
 	return s
 }
@@ -120,11 +120,11 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 		sessionID := r.Header.Get("X-Agentic-Session")
 		resolveAlias := env.Model
 		if rule, ok := cfg.Routing[env.Model]; ok {
-			chosen, tier := s.auto.route(r.Context(), rule, cfg, raw, sessionID)
-			s.log.Info("autoroute", "alias", env.Model, "tier", tier, "model", chosen)
+			chosen, tier, reason := s.auto.route(r.Context(), rule, cfg, raw, sessionID)
+			s.log.Info("autoroute", "alias", env.Model, "tier", tier, "model", chosen, "reason", reason)
 			resolveAlias = chosen
 			if sessionID != "" {
-				if err := s.store.RecordRouteDecision(sessionID, env.Model, tier, chosen, time.Now()); err != nil {
+				if err := s.store.RecordRouteDecision(sessionID, env.Model, tier, chosen, reason, time.Now()); err != nil {
 					s.log.Warn("route decision insert failed", "err", err)
 				}
 				worthy, reason, isNewTurn := s.goal.check(r.Context(), rule, cfg, raw, sessionID)
@@ -149,6 +149,27 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 		if err != nil {
 			anthropic.WriteError(w, 404, "not_found_error", "agentic: "+err.Error()+" (see ~/.agentic/config.yaml)")
 			return
+		}
+
+		// Dispatch-time prompt-too-long guard: for a model with a known
+		// context budget, refuse requests the budget can't hold before they
+		// reach upstream and fail with a mangled, provider-specific error.
+		// 400 (not 413) so Claude Code doesn't retry-spin — same rationale as
+		// the budget gate below. count_tokens never dispatches, so skip it.
+		if !countTokens {
+			if req, perr := anthropic.ParseRequest(raw); perr == nil {
+				if overflow, required, budget := promptTooLong(route, req); overflow {
+					msg := fmt.Sprintf("agentic: request too large for model %q context budget "+
+						"(estimated %d + reserved output exceeds budget %d); "+
+						"reduce the conversation or switch models",
+						route.Model.ID, required, budget)
+					anthropic.WriteError(w, 400, "invalid_request_error", msg)
+					s.log.Info("prompt_too_long",
+						"model", route.Model.ID, "alias", resolveAlias,
+						"estimated_input", required, "budget", budget)
+					return
+				}
+			}
 		}
 
 		profile := r.Header.Get("X-Agentic-Profile")
