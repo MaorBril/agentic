@@ -150,6 +150,43 @@ func (s *Store) EndSession(id string, at time.Time) error {
 	return err
 }
 
+// ActiveSession is a launched session that has not recorded an end. A
+// session that died without cleanup (kill -9, crash) lingers here — LastSeen
+// (the newest usage event) lets callers flag those instead of trusting the
+// row blindly.
+type ActiveSession struct {
+	ID        string
+	Profile   string
+	WorkDir   string
+	StartedAt time.Time
+	LastSeen  time.Time // zero when no usage was ever attributed
+}
+
+// ActiveSessions returns open sessions, most recently started first.
+func (s *Store) ActiveSessions() ([]ActiveSession, error) {
+	rows, err := s.db.Query(`SELECT id, COALESCE(profile,''), COALESCE(work_dir,''), started_at,
+  COALESCE((SELECT MAX(ts) FROM usage_events u WHERE u.session_id = sessions.id), 0)
+FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActiveSession
+	for rows.Next() {
+		var a ActiveSession
+		var started, seen int64
+		if err := rows.Scan(&a.ID, &a.Profile, &a.WorkDir, &started, &seen); err != nil {
+			return nil, err
+		}
+		a.StartedAt = time.Unix(started, 0)
+		if seen > 0 {
+			a.LastSeen = time.Unix(seen, 0)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // RecordRouteDecision persists the auto-router's tier/model choice for a
 // session's current turn, overwriting any prior decision for that session
 // (a session re-classifies as new user turns arrive).

@@ -79,3 +79,42 @@ func TestGoalDecisionRoundTrip(t *testing.T) {
 		t.Errorf("other session: ok=%v err=%v, want ok=false err=nil", ok, err)
 	}
 }
+
+func TestActiveSessions(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "agentic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	now := time.Now().Truncate(time.Second)
+	st.StartSession("sess-live", "main", "/tmp/a", now.Add(-time.Hour))
+	st.StartSession("sess-done", "main", "/tmp/b", now.Add(-2*time.Hour))
+	st.EndSession("sess-done", now)
+	st.RecordUsage(UsageEvent{TS: now.Add(-time.Minute), SessionID: "sess-live", InputTokens: 10})
+
+	active, err := st.ActiveSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].ID != "sess-live" {
+		t.Fatalf("active = %+v, want just sess-live", active)
+	}
+	a := active[0]
+	if a.Profile != "main" || a.WorkDir != "/tmp/a" {
+		t.Errorf("session fields: %+v", a)
+	}
+	if !a.StartedAt.Equal(now.Add(-time.Hour)) {
+		t.Errorf("StartedAt = %v", a.StartedAt)
+	}
+	if !a.LastSeen.Equal(now.Add(-time.Minute)) {
+		t.Errorf("LastSeen = %v, want usage event time", a.LastSeen)
+	}
+
+	// A session with no usage has zero LastSeen.
+	st.StartSession("sess-quiet", "cheap", "/tmp/c", now)
+	active, _ = st.ActiveSessions()
+	if len(active) != 2 || active[0].ID != "sess-quiet" || !active[0].LastSeen.IsZero() {
+		t.Errorf("active = %+v, want sess-quiet first with zero LastSeen", active)
+	}
+}
