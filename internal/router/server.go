@@ -170,6 +170,20 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 					return
 				}
 			}
+			// Request body byte cap (e.g. an upstream nginx limit). Refuse
+			// oversized bodies — common with accumulated images/attachments —
+			// before dispatch, instead of a mangled upstream 413 retry loop.
+			if tooLarge, size, cap := bodyTooLarge(route, int64(len(raw))); tooLarge {
+				msg := fmt.Sprintf("agentic: request body too large for provider %q "+
+					"(%d bytes exceeds max_request_bytes %d); "+
+					"run /compact or remove images/attachments",
+					route.ProviderName, size, cap)
+				anthropic.WriteError(w, 400, "invalid_request_error", msg)
+				s.log.Info("request_too_large",
+					"model", route.Model.ID, "alias", resolveAlias,
+					"bytes", size, "max_request_bytes", cap)
+				return
+			}
 		}
 
 		profile := r.Header.Get("X-Agentic-Profile")

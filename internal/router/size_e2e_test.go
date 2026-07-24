@@ -179,3 +179,130 @@ func TestAutoRouteSizeRemapEndToEnd(t *testing.T) {
 		t.Errorf("reason=%q should record size:light→standard", reason)
 	}
 }
+
+// TestRequestBodyGuard: a provider with max_request_bytes refuses an oversized
+// body with a clean 400 before upstream; a small body passes.
+func TestRequestBodyGuard(t *testing.T) {
+	reached := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Providers: map[string]config.Provider{
+			"fake":   {Type: config.ProviderOpenAI, BaseURL: upstream.URL},
+			"capped": {Type: config.ProviderOpenAI, BaseURL: upstream.URL, MaxRequestBytes: 1024},
+		},
+		Models:   map[string]config.Model{"capped-model": {Provider: "capped", ID: "capped-up"}},
+		Profiles: map[string]config.Profile{"main": {Model: "capped-model"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "agentic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	srv := NewServer(cfg, testToken, dir, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// Oversized body (2000 bytes > 1024 cap).
+	big := `{"model":"capped-model","max_tokens":50,"messages":[{"role":"user","content":"` + strings.Repeat("x", 2000) + `"}]}`
+	resp, body := post(t, ts.URL+"/v1/messages", testToken, big)
+	if resp.StatusCode != 400 {
+		t.Fatalf("status = %d, want 400; body: %s", resp.StatusCode, body)
+	}
+	for _, want := range []string{"invalid_request_error", "too large", "max_request_bytes"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q: %s", want, body)
+		}
+	}
+	if reached {
+		t.Error("oversized body must not reach upstream")
+	}
+
+	// Small body passes.
+	reached = false
+	resp, body = post(t, ts.URL+"/v1/messages", testToken,
+		`{"model":"capped-model","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("small body status = %d, want 200; body: %s", resp.StatusCode, body)
+	}
+	if !reached {
+		t.Error("small body should reach upstream")
+	}
+}
+
+// TestAutoRouteByteCapExcludesTier: a routing rule where the light tier's
+// provider has a byte cap; an oversized body routes away from it.
+func TestAutoRouteByteCapExcludesTier(t *testing.T) {
+	var seenModels []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model string `json:"model"`
+		}
+		json.Unmarshal(body, &req)
+		seenModels = append(seenModels, req.Model)
+		w.Header().Set("Content-Type", "application/json")
+		if req.Model == "classifier-up" {
+			io.WriteString(w, `{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"light"},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":1}}`)
+			return
+		}
+		io.WriteString(w, `{"id":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Providers: map[string]config.Provider{
+			"fake":   {Type: config.ProviderOpenAI, BaseURL: upstream.URL},
+			"capped": {Type: config.ProviderOpenAI, BaseURL: upstream.URL, MaxRequestBytes: 512},
+		},
+		Models: map[string]config.Model{
+			"cheap": {Provider: "fake", ID: "classifier-up"},
+			"big":   {Provider: "fake", ID: "deep-up", ContextWindow: 128000},
+			"small": {Provider: "capped", ID: "light-up", ContextWindow: 128000},
+		},
+		Routing: map[string]config.RouteRule{
+			"auto": {Classifier: "cheap", Default: "deep",
+				Tiers: map[string]string{"deep": "big", "light": "small"}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "agentic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := NewServer(cfg, testToken, dir, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Body > 512 bytes exceeds small's provider cap; classifier says light, but
+	// the byte cap filters it out → routes to big (deep).
+	big := `{"model":"auto","max_tokens":100,"messages":[{"role":"user","content":"` + strings.Repeat("word ", 200) + `"}]}`
+	resp, body := post(t, ts.URL+"/v1/messages", testToken, big)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	if len(seenModels) < 2 || seenModels[len(seenModels)-1] != "deep-up" {
+		t.Errorf("routed to %v, want last call to deep-up (escaped byte-capped light)", seenModels)
+	}
+	alias, tier, model, reason, ok, err := st.LatestRouteDecision("sess-test")
+	if err != nil || !ok || tier != "deep" || model != "big" {
+		t.Errorf("decision: alias=%s tier=%s model=%s ok=%v err=%v, want tier=deep model=big", alias, tier, model, ok, err)
+	}
+	// With only "deep" eligible (light byte-filtered), the classifier call is
+	// skipped and there's no remap to record — reason stays empty. The point
+	// is that the request escaped the byte-capped tier, which it did (tier=deep).
+	_ = reason
+}

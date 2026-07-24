@@ -66,10 +66,10 @@ func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *conf
 		return rule.Tiers[fallback], fallback, ""
 	}
 
-	// Size-aware fit: which tiers can hold this request? Required==0 means
-	// no tier has a known budget — the backward-compat fast path (no
-	// estimate, no filtering).
-	fit := classifyTierFit(cfg, rule, req)
+	// Size-aware fit: which tiers can hold this request? Required==0 and no
+	// byte caps means no tier has a known limit — the backward-compat fast
+	// path (no estimate, no filtering).
+	fit := classifyTierFit(cfg, rule, req, int64(len(raw)))
 
 	userText, isNewTurn := lastUserText(req)
 	hash := hashText(userText)

@@ -90,6 +90,24 @@ the estimate, required tokens, excluded tiers, and the remap; `route_decisions`
 gains a `reason` column (`size:light→standard`, `size:sticky:light→standard`)
 visible via the statusline and `agentic context`.
 
+**Request-body byte cap.** Separate from the token budget: some upstreams cap
+the raw request body size (e.g. an nginx `client_max_body_size`), and a body can
+blow that cap while still being token-small — most often with accumulated
+base64 images/attachments. Declare it on the provider:
+
+```yaml
+providers:
+  glm52: {type: openai, base_url: …, api_key_env: VLLM_API_KEY, max_request_bytes: 33554432} # 32 MiB
+```
+
+The router treats it like the token budget: a tier whose provider cap the body
+exceeds is filtered out before routing (so an image-heavy turn routes away from
+the capped provider), and a pre-dispatch guard refuses a body over the resolved
+provider's cap with a `400 invalid_request_error` ("request body too large … run
+/compact or remove images/attachments") instead of a mangled upstream 413 retry
+loop. Unknown cap (`0`) means no guard. `agentic providers add --max-request-bytes`
+sets it.
+
 ## Evaluating it
 
 Three layers, from cheap to real:

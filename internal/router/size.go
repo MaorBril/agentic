@@ -46,32 +46,50 @@ func tierBudget(cfg *config.Config, alias string) int {
 	return r.Model.ContextBudget()
 }
 
-// fitDecision summarizes the size-aware filtering of a route rule's tiers.
-type fitDecision struct {
-	Eligible map[string]bool // tier name -> fits (budget unknown => true)
-	Required int64           // estimated input + reserved output; 0 when no estimate
-	EstInput int64           // the estimate, or 0 when no tier had a known budget
-	Filtered []string        // tiers excluded because they don't fit (sorted)
+// tierMaxRequestBytes resolves the request-body byte cap for a tier's provider.
+// Returns 0 when unknown (no cap) or the alias fails to resolve.
+func tierMaxRequestBytes(cfg *config.Config, alias string) int {
+	if cfg == nil {
+		return 0
+	}
+	r, err := cfg.Resolve(alias)
+	if err != nil {
+		return 0
+	}
+	return r.Provider.MaxRequestBytes
 }
 
-// classifyTierFit computes which tiers can hold the request. When no tier has
-// a known budget, it returns every tier eligible with Required==0 and computes
-// no estimate — the backward-compat fast path (all pre-Phase-3 configs).
-func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.MessagesRequest) fitDecision {
+// fitDecision summarizes the size-aware filtering of a route rule's tiers.
+type fitDecision struct {
+	Eligible  map[string]bool // tier name -> fits (budget/bytes unknown => true)
+	Required  int64           // estimated input + reserved output; 0 when no estimate
+	EstInput  int64           // the estimate, or 0 when no tier had a known budget
+	BodyBytes int64           // raw request body size, for byte-cap filtering
+	Filtered  []string        // tiers excluded because they don't fit (sorted)
+}
+
+// classifyTierFit computes which tiers can hold the request. A tier is eligible
+// only if it fits BOTH the token budget and the provider's request-byte cap
+// (where either is known). When no tier has any known limit, it returns every
+// tier eligible with Required==0 — the backward-compat fast path.
+func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.MessagesRequest, bodyBytes int64) fitDecision {
 	elig := map[string]bool{}
 	for t := range rule.Tiers {
 		elig[t] = true
 	}
 
-	anyKnown := false
+	anyTokenKnown := false
+	anyByteKnown := false
 	for _, alias := range rule.Tiers {
 		if tierBudget(cfg, alias) > 0 {
-			anyKnown = true
-			break
+			anyTokenKnown = true
+		}
+		if tierMaxRequestBytes(cfg, alias) > 0 {
+			anyByteKnown = true
 		}
 	}
-	if !anyKnown {
-		return fitDecision{Eligible: elig}
+	if !anyTokenKnown && !anyByteKnown {
+		return fitDecision{Eligible: elig, BodyBytes: bodyBytes}
 	}
 
 	est := tokens.Estimate(req)
@@ -91,23 +109,28 @@ func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.M
 
 	var filtered []string
 	for tier, alias := range rule.Tiers {
-		b := tierBudget(cfg, alias)
-		if b == 0 || required <= int64(b) {
-			elig[tier] = true
-		} else {
-			elig[tier] = false
+		fits := true
+		if b := tierBudget(cfg, alias); b > 0 && required > int64(b) {
+			fits = false
+		}
+		if mb := tierMaxRequestBytes(cfg, alias); mb > 0 && bodyBytes > int64(mb) {
+			fits = false
+		}
+		elig[tier] = fits
+		if !fits {
 			filtered = append(filtered, tier)
 		}
 	}
 	sort.Strings(filtered)
-	return fitDecision{Eligible: elig, Required: required, EstInput: est, Filtered: filtered}
+	return fitDecision{Eligible: elig, Required: required, EstInput: est, BodyBytes: bodyBytes, Filtered: filtered}
 }
 
 // onlyEligibleTier returns the single eligible tier when exactly one remains,
 // and ok=true. Used to skip the classifier call when size filtering has left
-// only one viable tier.
+// only one viable tier. Inactive when no filtering is active (Required==0 and
+// no byte filtering occurred).
 func onlyEligibleTier(fit fitDecision) (tier string, ok bool) {
-	if fit.Required == 0 {
+	if fit.Required == 0 && len(fit.Filtered) == 0 {
 		return "", false // filtering inactive
 	}
 	for t, ok2 := range fit.Eligible {
@@ -188,6 +211,33 @@ func promptTooLong(route config.Resolved, req *anthropic.MessagesRequest) (overf
 	}
 	required = tokens.Estimate(req) + int64(reservedOutput(reqMax, route.Model.MaxOutput))
 	return required > int64(budget), required, budget
+}
+
+// bodyTooLarge reports whether the resolved model's provider has a known
+// request-byte cap that the raw body exceeds. Returns false when the cap is
+// unknown (no guard). Used as a pre-dispatch guard so an oversized body —
+// common with accumulated images/attachments — is refused with a clean 400
+// instead of a mangled upstream 413 retry loop.
+func bodyTooLarge(route config.Resolved, bodyBytes int64) (tooLarge bool, size int64, cap int) {
+	cap = route.Provider.MaxRequestBytes
+	if cap <= 0 {
+		return false, 0, 0
+	}
+	return bodyBytes > int64(cap), bodyBytes, cap
+}
+
+// requestFits reports whether a resolved model can serve a request of the
+// given token requirement and body size. False when either the token budget or
+// the byte cap (where known) is exceeded. Used by the dispatch guard to cover
+// both limits in one check.
+func requestFits(route config.Resolved, req *anthropic.MessagesRequest, bodyBytes int64) bool {
+	if overflow, _, _ := promptTooLong(route, req); overflow {
+		return false
+	}
+	if tooLarge, _, _ := bodyTooLarge(route, bodyBytes); tooLarge {
+		return false
+	}
+	return true
 }
 
 // budgetSortKey orders budgets ascending with unknown (0) treated as +Inf,

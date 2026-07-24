@@ -60,7 +60,7 @@ func TestClassifyTierFitNoBudgetsShortCircuits(t *testing.T) {
 		},
 	}
 	rule := config.RouteRule{Tiers: map[string]string{"deep": "opus", "standard": "sonnet"}}
-	fit := classifyTierFit(cfg, rule, reqWith("hello"))
+	fit := classifyTierFit(cfg, rule, reqWith("hello"), 0)
 	if fit.Required != 0 || fit.EstInput != 0 {
 		t.Errorf("expected short-circuit, got Required=%d EstInput=%d", fit.Required, fit.EstInput)
 	}
@@ -73,7 +73,7 @@ func TestClassifyTierFitFilters(t *testing.T) {
 	cfg := sizedCfg()
 	rule := config.RouteRule{Tiers: map[string]string{"deep": "opus", "standard": "sonnet", "light": "qwen"}}
 	// ~30000 tokens (60000 chars / 3.5 → ~17143, +10% margin ~18857, +reserved) → exceeds qwen's 8K, fits sonnet's 32K and opus's 128K.
-	fit := classifyTierFit(cfg, rule, reqWith(repeat("w ", 30000)))
+	fit := classifyTierFit(cfg, rule, reqWith(repeat("w ", 30000)), 0)
 	if fit.Required == 0 {
 		t.Fatal("expected an estimate")
 	}
@@ -168,4 +168,73 @@ func repeat(s string, n int) string {
 		out += s
 	}
 	return out
+}
+
+// --- byte-size guard ---
+
+func byteCfg() *config.Config {
+	return &config.Config{
+		Providers: map[string]config.Provider{
+			// "fake" has no byte cap; "capped" caps bodies at 1024 bytes.
+			"fake":   {Type: config.ProviderOpenAI, BaseURL: "http://x"},
+			"capped": {Type: config.ProviderOpenAI, BaseURL: "http://x", MaxRequestBytes: 1024},
+		},
+		Models: map[string]config.Model{
+			"big":   {Provider: "fake", ID: "big-up", ContextWindow: 128000},
+			"small": {Provider: "capped", ID: "small-up", ContextWindow: 128000},
+		},
+	}
+}
+
+func TestBodyTooLarge(t *testing.T) {
+	cfg := byteCfg()
+	route, _ := cfg.Resolve("small") // capped provider, 1024-byte cap
+	if tooLarge, _, _ := bodyTooLarge(route, 500); tooLarge {
+		t.Error("500 bytes should fit under 1024 cap")
+	}
+	if tooLarge, size, cap := bodyTooLarge(route, 2000); !tooLarge {
+		t.Errorf("2000 bytes should overflow 1024 cap (size=%d cap=%d)", size, cap)
+	}
+	if cap := route.Provider.MaxRequestBytes; cap != 1024 {
+		t.Errorf("cap=%d want 1024", cap)
+	}
+}
+
+func TestBodyTooLargeUnknownCapNoGuard(t *testing.T) {
+	cfg := byteCfg()
+	route, _ := cfg.Resolve("big") // uncapped provider
+	if tooLarge, _, _ := bodyTooLarge(route, 10_000_000); tooLarge {
+		t.Error("unknown cap must never trip the guard")
+	}
+}
+
+func TestClassifyTierFitFiltersByBytes(t *testing.T) {
+	cfg := byteCfg()
+	rule := config.RouteRule{Tiers: map[string]string{"deep": "big", "light": "small"}}
+	// Body of 2000 bytes exceeds small's 1024-byte cap but fits big. Both
+	// tiers have the same 128K token budget, so only the byte cap differentiates.
+	fit := classifyTierFit(cfg, rule, reqWith("hi"), 2000)
+	if fit.Eligible["light"] {
+		t.Error("small (1024-byte cap) should be filtered out by a 2000-byte body")
+	}
+	if !fit.Eligible["deep"] {
+		t.Error("big (uncapped) should remain eligible")
+	}
+	if len(fit.Filtered) != 1 || fit.Filtered[0] != "light" {
+		t.Errorf("Filtered=%v want [light]", fit.Filtered)
+	}
+}
+
+func TestRemapTierEscapesByteCap(t *testing.T) {
+	cfg := byteCfg()
+	rule := config.RouteRule{Tiers: map[string]string{"deep": "big", "light": "small"}}
+	// Classifier picked light, but its 1024-byte cap is exceeded → remap to big.
+	fit := fitDecision{
+		Eligible:  map[string]bool{"deep": true, "light": false},
+		Required:  100,
+		BodyBytes: 2000,
+	}
+	if got := remapTier(cfg, rule, fit, "light"); got != "deep" {
+		t.Errorf("byte overflow remap = %s, want deep", got)
+	}
 }
