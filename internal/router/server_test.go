@@ -180,7 +180,7 @@ func TestAutoRouteEndToEnd(t *testing.T) {
 	}
 
 	// The routing decision is persisted so the statusline can show it.
-	alias, tier, model, ok, err := st.LatestRouteDecision("sess-test")
+	alias, tier, model, _, ok, err := st.LatestRouteDecision("sess-test")
 	if err != nil || !ok || alias != "auto" || tier != "deep" || model != "big" {
 		t.Errorf("route decision: alias=%s tier=%s model=%s ok=%v err=%v, want auto/deep/big/true/nil",
 			alias, tier, model, ok, err)

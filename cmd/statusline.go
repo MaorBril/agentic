@@ -50,7 +50,7 @@ var statuslineCmd = &cobra.Command{
 		day, _ := st.TotalSince(dayStart, "", "")
 
 		modelPart := orDefault(input.Model.DisplayName, "?")
-		if alias, tier, model, ok, _ := st.LatestRouteDecision(sessionID); ok && alias == input.Model.DisplayName {
+		if alias, tier, model, _, ok, _ := st.LatestRouteDecision(sessionID); ok && alias == input.Model.DisplayName {
 			tierColor := map[string]string{
 				"deep":     "\033[35m", // magenta
 				"standard": "\033[36m", // cyan

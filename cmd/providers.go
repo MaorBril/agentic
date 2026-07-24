@@ -16,6 +16,7 @@ var (
 	provBase   string
 	provKeyEnv string
 	provMaxTok string
+	provMaxReq int64
 )
 
 var providersCmd = &cobra.Command{
@@ -77,6 +78,9 @@ var providersAddCmd = &cobra.Command{
 		if provMaxTok != "" {
 			snippet += fmt.Sprintf("max_tokens_param: %s\n", provMaxTok)
 		}
+		if provMaxReq > 0 {
+			snippet += fmt.Sprintf("max_request_bytes: %d\n", provMaxReq)
+		}
 		return editConfig(func(doc *config.Doc) error {
 			return doc.SetSubtree("providers", args[0], snippet)
 		}, "provider "+args[0])
@@ -99,5 +103,6 @@ func init() {
 	providersAddCmd.Flags().StringVar(&provBase, "base-url", "", "API base URL")
 	providersAddCmd.Flags().StringVar(&provKeyEnv, "key-env", "", "env var holding the API key (empty = no auth)")
 	providersAddCmd.Flags().StringVar(&provMaxTok, "max-tokens-param", "", "max_tokens | max_completion_tokens")
+	providersAddCmd.Flags().Int64Var(&provMaxReq, "max-request-bytes", 0, "upstream request body cap in bytes (refuses oversized requests pre-dispatch; 0 = none)")
 	providersCmd.AddCommand(providersListCmd, providersAddCmd, providersRemoveCmd)
 }

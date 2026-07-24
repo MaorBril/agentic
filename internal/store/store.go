@@ -98,6 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
 	for _, col := range []string{
 		"ALTER TABLE usage_events ADD COLUMN ctx_budget INTEGER DEFAULT 0",
 		"ALTER TABLE usage_events ADD COLUMN reported_input INTEGER DEFAULT 0",
+		"ALTER TABLE route_decisions ADD COLUMN reason TEXT DEFAULT ''",
 	} {
 		if _, err := s.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
@@ -189,24 +190,26 @@ FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC`)
 
 // RecordRouteDecision persists the auto-router's tier/model choice for a
 // session's current turn, overwriting any prior decision for that session
-// (a session re-classifies as new user turns arrive).
-func (s *Store) RecordRouteDecision(sessionID, alias, tier, model string, at time.Time) error {
+// (a session re-classifies as new user turns arrive). reason is a free-text
+// note — e.g. "size:light→standard" when size-aware routing remapped a tier
+// — empty for a plain classifier decision.
+func (s *Store) RecordRouteDecision(sessionID, alias, tier, model, reason string, at time.Time) error {
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO route_decisions
-(session_id, alias, tier, model, at) VALUES (?,?,?,?,?)`,
-		sessionID, alias, tier, model, at.Unix())
+(session_id, alias, tier, model, reason, at) VALUES (?,?,?,?,?,?)`,
+		sessionID, alias, tier, model, reason, at.Unix())
 	return err
 }
 
 // LatestRouteDecision returns the most recent auto-router decision recorded
 // for a session, if any. ok is false when no decision has been recorded yet
 // (e.g. the profile isn't using a routing alias).
-func (s *Store) LatestRouteDecision(sessionID string) (alias, tier, model string, ok bool, err error) {
-	row := s.db.QueryRow(`SELECT alias, tier, model FROM route_decisions WHERE session_id = ?`, sessionID)
-	err = row.Scan(&alias, &tier, &model)
+func (s *Store) LatestRouteDecision(sessionID string) (alias, tier, model, reason string, ok bool, err error) {
+	row := s.db.QueryRow(`SELECT alias, tier, model, reason FROM route_decisions WHERE session_id = ?`, sessionID)
+	err = row.Scan(&alias, &tier, &model, &reason)
 	if err == sql.ErrNoRows {
-		return "", "", "", false, nil
+		return "", "", "", "", false, nil
 	}
-	return alias, tier, model, err == nil, err
+	return alias, tier, model, reason, err == nil, err
 }
 
 // RecordGoalDecision persists the auto-goal classifier's verdict for a

@@ -50,6 +50,12 @@ type Provider struct {
 	// MaxTokensParam is the OpenAI-dialect parameter name for the output
 	// limit: "max_tokens" (default) or "max_completion_tokens".
 	MaxTokensParam string `yaml:"max_tokens_param"`
+	// MaxRequestBytes is the upstream's request body size cap (e.g. an nginx
+	// client_max_body_size). A request larger than this is refused before
+	// dispatch with a clean 400 instead of a mangled upstream 413 retry loop.
+	// 0 means unknown/no cap. Sits on the provider because the cap belongs to
+	// the upstream edge, not the model.
+	MaxRequestBytes int `yaml:"max_request_bytes"`
 }
 
 // Key resolves the provider's API key: config literal, then process
@@ -194,6 +200,9 @@ func (c *Config) Validate() error {
 		}
 		if p.BaseURL == "" {
 			return fmt.Errorf("config: provider %q missing base_url", name)
+		}
+		if p.MaxRequestBytes < 0 {
+			return fmt.Errorf("config: provider %q has negative max_request_bytes", name)
 		}
 	}
 	for alias, m := range c.Models {
