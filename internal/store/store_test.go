@@ -14,31 +14,31 @@ func TestRouteDecisionRoundTrip(t *testing.T) {
 	defer st.Close()
 
 	// No decision recorded yet.
-	if _, _, _, ok, err := st.LatestRouteDecision("sess-1"); ok || err != nil {
+	if _, _, _, _, ok, err := st.LatestRouteDecision("sess-1"); ok || err != nil {
 		t.Errorf("empty lookup: ok=%v err=%v, want ok=false err=nil", ok, err)
 	}
 
-	if err := st.RecordRouteDecision("sess-1", "auto", "deep", "opus", time.Now()); err != nil {
+	if err := st.RecordRouteDecision("sess-1", "auto", "deep", "opus", "size:light→deep", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	alias, tier, model, ok, err := st.LatestRouteDecision("sess-1")
-	if err != nil || !ok || alias != "auto" || tier != "deep" || model != "opus" {
-		t.Errorf("got alias=%s tier=%s model=%s ok=%v err=%v, want auto/deep/opus/true/nil",
-			alias, tier, model, ok, err)
+	alias, tier, model, reason, ok, err := st.LatestRouteDecision("sess-1")
+	if err != nil || !ok || alias != "auto" || tier != "deep" || model != "opus" || reason != "size:light→deep" {
+		t.Errorf("got alias=%s tier=%s model=%s reason=%q ok=%v err=%v, want auto/deep/opus/\"size:light→deep\"/true/nil",
+			alias, tier, model, reason, ok, err)
 	}
 
 	// A later decision for the same session overwrites, not duplicates.
-	if err := st.RecordRouteDecision("sess-1", "auto", "light", "qwen", time.Now()); err != nil {
+	if err := st.RecordRouteDecision("sess-1", "auto", "light", "qwen", "", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	alias, tier, model, ok, err = st.LatestRouteDecision("sess-1")
-	if err != nil || !ok || alias != "auto" || tier != "light" || model != "qwen" {
-		t.Errorf("after overwrite: alias=%s tier=%s model=%s ok=%v err=%v, want auto/light/qwen/true/nil",
-			alias, tier, model, ok, err)
+	alias, tier, model, reason, ok, err = st.LatestRouteDecision("sess-1")
+	if err != nil || !ok || alias != "auto" || tier != "light" || model != "qwen" || reason != "" {
+		t.Errorf("after overwrite: alias=%s tier=%s model=%s reason=%q ok=%v err=%v, want auto/light/qwen/\"\"/true/nil",
+			alias, tier, model, reason, ok, err)
 	}
 
 	// A different session is unaffected.
-	if _, _, _, ok, err := st.LatestRouteDecision("sess-2"); ok || err != nil {
+	if _, _, _, _, ok, err := st.LatestRouteDecision("sess-2"); ok || err != nil {
 		t.Errorf("other session: ok=%v err=%v, want ok=false err=nil", ok, err)
 	}
 }

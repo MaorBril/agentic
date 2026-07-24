@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 // doesn't flip models mid-flight.
 type autoRouter struct {
 	classify func(ctx context.Context, rule config.RouteRule, cfg *config.Config, summary string) (string, error)
+	log      *slog.Logger
 
 	mu    sync.Mutex
 	cache map[string]decision // key: session id (or user-text hash when unattributed)
@@ -43,8 +45,11 @@ light: mechanical edits, renames, formatting, summaries, verifying provided outp
 Request to classify:
 `
 
-// route picks the concrete model alias for a dynamically-routed request.
-func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *config.Config, raw []byte, sessionID string) (alias, tier string) {
+// route picks the concrete model alias for a dynamically-routed request. The
+// returned reason is a free-text note for observability — non-empty when
+// size-aware routing remapped the classifier's choice (e.g.
+// "size:light→standard"); empty for a plain classifier decision.
+func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *config.Config, raw []byte, sessionID string) (alias, tier, reason string) {
 	fallback := rule.Default
 	if fallback == "" {
 		fallback = "standard"
@@ -58,8 +63,14 @@ func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *conf
 
 	req, err := anthropic.ParseRequest(raw)
 	if err != nil {
-		return rule.Tiers[fallback], fallback
+		return rule.Tiers[fallback], fallback, ""
 	}
+
+	// Size-aware fit: which tiers can hold this request? Required==0 and no
+	// byte caps means no tier has a known limit — the backward-compat fast
+	// path (no estimate, no filtering).
+	fit := classifyTierFit(cfg, rule, req, int64(len(raw)))
+
 	userText, isNewTurn := lastUserText(req)
 	hash := hashText(userText)
 	key := sessionID
@@ -75,11 +86,28 @@ func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *conf
 	// turn keep the tier that opened the turn.
 	if hasPrev && (!isNewTurn || prev.userHash == hash) {
 		if _, ok := rule.Tiers[prev.tier]; ok {
-			return rule.Tiers[prev.tier], prev.tier
+			if fit.Eligible[prev.tier] {
+				return rule.Tiers[prev.tier], prev.tier, ""
+			}
+			// The sticky tier can't hold this (larger) continuation.
+			// Remap upward without re-classifying, and pin the cache so the
+			// rest of the turn stays on the remapped tier.
+			remapped := remapTier(cfg, rule, fit, prev.tier)
+			a.logFit(rule, fit, prev.tier, remapped, "sticky")
+			a.cacheDecision(key, hash, remapped)
+			return rule.Tiers[remapped], remapped, "size:sticky:" + prev.tier + "→" + remapped
 		}
 	}
 	if userText == "" {
-		return rule.Tiers[fallback], fallback
+		return rule.Tiers[fallback], fallback, ""
+	}
+
+	// When size filtering has left exactly one viable tier, skip the
+	// classifier call — there's nothing to decide.
+	if t, ok := onlyEligibleTier(fit); ok {
+		a.logFit(rule, fit, "", t, "only")
+		a.cacheDecision(key, hash, t)
+		return rule.Tiers[t], t, ""
 	}
 
 	summary := fmt.Sprintf("(conversation: %d messages, %d tools available)\n%s",
@@ -91,13 +119,45 @@ func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *conf
 		tier = fallback
 	}
 
+	// The classifier has no notion of size; if it picked a tier the request
+	// won't fit, remap upward to the smallest tier that does.
+	if fit.Required > 0 && !fit.Eligible[tier] {
+		chosen := tier
+		tier = remapTier(cfg, rule, fit, chosen)
+		a.logFit(rule, fit, chosen, tier, "remap")
+		reason = "size:" + chosen + "→" + tier
+	}
+
+	a.cacheDecision(key, hash, tier)
+	return rule.Tiers[tier], tier, reason
+}
+
+// cacheDecision stores a tier decision under key, flushing the cache when it
+// exceeds 1000 entries.
+func (a *autoRouter) cacheDecision(key, hash, tier string) {
 	a.mu.Lock()
 	if len(a.cache) > 1000 {
 		a.cache = map[string]decision{}
 	}
 	a.cache[key] = decision{userHash: hash, tier: tier, at: time.Now()}
 	a.mu.Unlock()
-	return rule.Tiers[tier], tier
+}
+
+// logFit emits a Debug-level autoroute_size event when size filtering is
+// active. from is the classifier-chosen (or sticky) tier; to is the tier
+// actually used. kind is "sticky" | "only" | "remap".
+func (a *autoRouter) logFit(rule config.RouteRule, fit fitDecision, from, to, kind string) {
+	if a.log == nil {
+		return
+	}
+	a.log.Debug("autoroute_size",
+		"estimated_input", fit.EstInput,
+		"required", fit.Required,
+		"excluded", fit.Filtered,
+		"from", from,
+		"to", to,
+		"kind", kind,
+	)
 }
 
 // lastUserText returns the newest user-authored text and whether the last
