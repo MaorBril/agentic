@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/maorbril/agentic/internal/config"
 	"github.com/maorbril/agentic/internal/store"
 )
 
@@ -61,31 +62,46 @@ var statuslineCmd = &cobra.Command{
 			}
 		}
 
-		line := fmt.Sprintf("%s · %s · sess $%.2f · day $%.2f",
-			orDefault(profile, "agentic"), modelPart, sess, day)
-
-		if goal, reason, ok, _ := st.LatestGoalDecision(sessionID); ok && goal {
-			line += fmt.Sprintf(" · \033[33m⟳ goal\033[0m (%s)", truncateForStatus(reason))
+		var goalReason string
+		goal, reason, ok, _ := st.LatestGoalDecision(sessionID)
+		if ok && goal {
+			goalReason = reason
 		}
 
-		if cfg.Budgets != nil && cfg.Budgets.Daily > 0 {
-			frac := day / cfg.Budgets.Daily
-			color := "\033[32m" // green
-			warnAt := cfg.Budgets.WarnAt
-			if warnAt == 0 {
-				warnAt = 0.8
-			}
-			switch {
-			case frac >= 1:
-				color = "\033[31m" // red
-			case frac >= warnAt:
-				color = "\033[33m" // yellow
-			}
-			line += fmt.Sprintf("/$%.0f %s[%s]\033[0m", cfg.Budgets.Daily, color, bar(frac, 6))
-		}
-		fmt.Println(line)
+		fmt.Println(statusLine(orDefault(profile, "agentic"), modelPart, sess, day, cfg.Budgets, goalReason))
 		return nil
 	},
+}
+
+// statusLine builds the printed status line. Segment order matters: the
+// budget suffix ("/$600 [bar]") describes the day-spend figure and must sit
+// immediately after it — appending it after the goal segment instead makes
+// it read as though it belongs to the goal reason. goalReason == "" omits
+// the goal segment entirely.
+func statusLine(profile, modelPart string, sess, day float64, budgets *config.Budget, goalReason string) string {
+	line := fmt.Sprintf("%s · %s · sess $%.2f · day $%.2f", profile, modelPart, sess, day)
+
+	if budgets != nil && budgets.Daily > 0 {
+		frac := day / budgets.Daily
+		color := "\033[32m" // green
+		warnAt := budgets.WarnAt
+		if warnAt == 0 {
+			warnAt = 0.8
+		}
+		switch {
+		case frac >= 1:
+			color = "\033[31m" // red
+		case frac >= warnAt:
+			color = "\033[33m" // yellow
+		}
+		line += fmt.Sprintf("/$%.0f %s[%s]\033[0m", budgets.Daily, color, bar(frac, 6))
+	}
+
+	if goalReason != "" {
+		line += fmt.Sprintf(" · \033[33m⟳ goal\033[0m (%s)", truncateForStatus(goalReason))
+	}
+
+	return line
 }
 
 func orDefault(s, def string) string {
