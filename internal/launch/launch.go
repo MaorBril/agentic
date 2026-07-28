@@ -120,10 +120,10 @@ func Run(ctx context.Context, cfg *config.Config, dataDir string, opts Options, 
 			printSummary(dataDir, cfg, sessionID, profName)
 		}()
 
-		// Offer to refresh the per-alias subagents when they've drifted from
+		// Notice (non-blocking) when the per-alias subagents have drifted from
 		// config. Router-backed sessions only — a passthrough profile doesn't
 		// resolve agentic aliases, so the generated agents wouldn't work there.
-		offerAgentSync(cfg, dataDir)
+		noticeAgentDrift(cfg, dataDir)
 	}
 
 	child := buildChild(opts)

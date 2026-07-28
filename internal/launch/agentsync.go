@@ -1,26 +1,26 @@
 package launch
 
 import (
-	"bufio"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/maorbril/agentic/internal/agents"
 	"github.com/maorbril/agentic/internal/config"
 )
 
-// offerAgentSync prompts once, at launch, when the generated subagents have
-// drifted from the configured model aliases. Deliberately quiet: it says
-// nothing when in sync, when not attached to a terminal (piped/headless runs
-// must never block on input), when AGENTIC_NO_AGENT_SYNC is set, or when the
-// user already declined this exact config state.
-func offerAgentSync(cfg *config.Config, dataDir string) {
+// noticeAgentDrift prints a one-shot, NON-BLOCKING notice when the generated
+// per-alias subagents have drifted from config, pointing at `agentic agents
+// sync`. It deliberately does not read stdin: this runs immediately before
+// the interactive claude child takes over the terminal, and the tty may be
+// in raw mode (Enter arrives as \r, not \n) — a cooked line read would hang
+// forever. Quiet when in sync, when not on a terminal, when opted out, or
+// when the user already dismissed this exact config state.
+func noticeAgentDrift(cfg *config.Config, dataDir string) {
 	if os.Getenv("AGENTIC_NO_AGENT_SYNC") != "" {
 		return
 	}
-	if !isInteractive() {
-		return
+	if !isTerminal(os.Stderr) {
+		return // no one to read the notice
 	}
 	dir, err := agents.Dir()
 	if err != nil {
@@ -32,27 +32,16 @@ func offerAgentSync(cfg *config.Config, dataDir string) {
 	}
 	fp := agents.Fingerprint(cfg)
 	if agents.Declined(dataDir, fp) {
-		return // already said no to this exact state
+		return // already shown for this exact config state
 	}
 
-	fmt.Fprintf(os.Stderr, "\nagentic: %s\n", summarize(changes))
-	fmt.Fprintf(os.Stderr, "  These let you target a specific model by name (e.g. subagent_type: %q).\n",
-		firstName(changes))
-	fmt.Fprint(os.Stderr, "  Update ~/.claude/agents now? [y/N] ")
+	fmt.Fprintf(os.Stderr, "\nagentic: %s — run `agentic agents sync` to make them selectable (e.g. subagent_type: %q).\n",
+		summarize(changes), firstName(changes))
+	fmt.Fprintln(os.Stderr, "  (won't mention again until your model aliases change; AGENTIC_NO_AGENT_SYNC=1 to silence)")
 
-	if !readYes() {
-		if err := agents.RecordDeclined(dataDir, fp); err == nil {
-			fmt.Fprintln(os.Stderr, "  skipped — won't ask again until your model aliases change (`agentic agents sync` anytime)")
-		}
-		return
-	}
-	applied, err := agents.Sync(cfg, dir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "  ⚠ could not write subagents: %v\n", err)
-		return
-	}
-	agents.ClearDeclined(dataDir)
-	fmt.Fprintf(os.Stderr, "  ✓ synced %d subagent(s) — available in new sessions\n", len(applied))
+	// Record now so the notice is one-shot per config state — we're not
+	// waiting for an answer, so "shown" is the only signal we have.
+	_ = agents.RecordDeclined(dataDir, fp)
 }
 
 func summarize(changes []agents.Change) string {
@@ -77,7 +66,18 @@ func summarize(changes []agents.Change) string {
 	if remove > 0 {
 		parts = append(parts, fmt.Sprintf("%d stale", remove))
 	}
-	return "model-alias subagents out of date (" + strings.Join(parts, ", ") + ")"
+	return "model-alias subagents out of date (" + joinComma(parts) + ")"
+}
+
+func joinComma(parts []string) string {
+	out := ""
+	for i, p := range parts {
+		if i > 0 {
+			out += ", "
+		}
+		out += p
+	}
+	return out
 }
 
 // firstName returns a created/updated subagent name for the example line,
@@ -91,28 +91,10 @@ func firstName(changes []agents.Change) string {
 	return changes[0].Name
 }
 
-// isInteractive reports whether stdin and stderr are both terminals, so a
-// prompt can be shown and answered.
-func isInteractive() bool {
-	return isTerminal(os.Stdin) && isTerminal(os.Stderr)
-}
-
 func isTerminal(f *os.File) bool {
 	info, err := f.Stat()
 	if err != nil {
 		return false
 	}
 	return info.Mode()&os.ModeCharDevice != 0
-}
-
-func readYes() bool {
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "y", "yes":
-		return true
-	}
-	return false
 }
