@@ -154,6 +154,19 @@ Two things you should understand before routing through agentic:
 - **Billing.** Traffic through the router is billed to **API keys**, not your Claude Pro/Max subscription. OAuth credentials are never proxied. For subscription billing, use a `passthrough: true` profile — normal claude, no tracking.
 - **Fidelity.** Non-Anthropic models work through translation, but Claude Code's prompts and tool patterns are tuned for Claude, so expect them to be clunkier in the main loop. They shine as cheap workhorses for background tasks and subagents. Specific gaps: no prompt caching on OpenAI-dialect backends (provider-side implicit caching still shows up as cache reads), thinking blocks are display-only, Anthropic server tools (web search, code execution) are unavailable on translated models, `top_k` is dropped, stop sequences truncate to four, and token counting for translated models is a deliberate ~15% overestimate so auto-compact fires early instead of overflowing context. Set `max_output` on models whose output cap is below what Claude Code requests (it asks for 32K), and `context_window` on models whose window differs from the ~200K Claude Code assumes (see [Context scaling](#context-scaling)).
 
+## Subagents on any model
+
+Claude Code's built-in Agent tool takes a fixed `model` parameter (`sonnet | opus | haiku | fable`), so a routed alias like `qwen` can't be picked through it — subagents are stuck on the Claude tiers even when your best tool for the job is something else. A subagent *definition's* `model:` frontmatter has no such limit, and behind agentic's local endpoint Claude Code passes that string straight through, so agentic generates one subagent per configured model alias:
+
+```bash
+agentic agents sync     # writes ~/.claude/agents/agentic-<alias>.md, one per model alias
+agentic agents list     # what's implied by your config, and what's pending
+```
+
+Every model you've configured becomes selectable by name — `subagent_type: "agentic-qwen"`, `"agentic-grok"`, `"agentic-gpt-5-6-sol"` — and its traffic routes, prices, and budgets like any other agentic request. The set is derived from your own `models:` map, so it's whatever *you* configured; nothing is hardcoded.
+
+When your aliases change, the next `agentic` launch offers to refresh them (once — decline and it stays quiet until the aliases change again; `AGENTIC_NO_AGENT_SYNC=1` opts out entirely). Only files prefixed `agentic-` are ever written or removed, so your own subagents are never touched.
+
 ## Works with clauder
 
 If [clauder](https://github.com/MaorBril/clauder) is installed, agentic launches sessions through `clauder wrap --slave`, so your instances get persistent memory, can message each other, and run with clauder's auto-approved tool set for autonomous operation. Launch with `--no-clauder` for a bare claude session. The two tools are independent; each works without the other.
@@ -166,6 +179,7 @@ If [clauder](https://github.com/MaorBril/clauder) is installed, agentic launches
 | `agentic setup` | first-run config, token, statusline registration |
 | `agentic cost [--week\|--month] [--by model\|profile\|session]` | spend report |
 | `agentic context [session-id]` | context-fullness trajectory (true vs reported tokens) |
+| `agentic agents list/sync` | subagent definitions for your model aliases |
 | `agentic models add/list/remove/test/update-prices` | model aliases |
 | `agentic providers add/list/remove` | upstream providers |
 | `agentic profiles list/show` · `agentic budget set` | profiles and caps |
