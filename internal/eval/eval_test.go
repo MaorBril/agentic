@@ -1,0 +1,486 @@
+package eval
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/maorbril/agentic/internal/store"
+)
+
+func TestLoadManifestStrictAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tasks.yaml")
+	valid := `version: 1
+name: smoke
+tasks:
+  - id: one
+    repo: /tmp/repo
+    prompt: fix it
+    verifier:
+      run: [go, test, ./...]
+      timeout: 2m
+`
+	if err := os.WriteFile(path, []byte(valid), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Tasks[0].Verifier.Timeout != 2*time.Minute {
+		t.Fatalf("timeout = %v", m.Tasks[0].Verifier.Timeout)
+	}
+
+	invalid := strings.Replace(valid, "name: smoke", "unknown: value\nname: smoke", 1)
+	if err := os.WriteFile(path, []byte(invalid), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadManifest(path); err == nil || !strings.Contains(err.Error(), "field unknown") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadDatasetManifestAndFilter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "swebench.yaml")
+	manifest := `version: 1
+name: swebench-smoke
+dataset:
+  type: swebench
+  source: princeton-nlp/SWE-bench_Verified
+  tasks:
+    - astropy__astropy-14309
+    - django__django-11001
+sandbox:
+  type: docker
+`
+	if err := os.WriteFile(path, []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.IsDataset() || m.Dataset.Type != "swebench" || m.Dataset.Source != "princeton-nlp/SWE-bench_Verified" || m.Sandbox.Type != "docker" {
+		t.Fatalf("manifest = %+v", m)
+	}
+	if err := FilterTasks(m, []string{"astropy__astropy-14309"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Dataset.Tasks) != 1 || m.Dataset.Tasks[0] != "astropy__astropy-14309" {
+		t.Fatalf("filtered dataset tasks = %+v", m.Dataset.Tasks)
+	}
+}
+
+func TestDatasetManifestValidation(t *testing.T) {
+	base := func() *Manifest {
+		return &Manifest{Version: SchemaVersion, Name: "swebench-smoke", Dataset: Dataset{
+			Type: "swebench", Source: "princeton-nlp/SWE-bench_Verified", Tasks: []string{"astropy__astropy-14309"},
+		}, Sandbox: Sandbox{Type: "docker"}}
+	}
+	if m := base(); m.Validate() != nil {
+		t.Fatalf("valid dataset manifest rejected: %v", m.Validate())
+	}
+	m := base()
+	m.Dataset.Type = "other"
+	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported dataset type") {
+		t.Fatalf("dataset type error = %v", err)
+	}
+	m = base()
+	m.Dataset.Source = ""
+	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "dataset.source") {
+		t.Fatalf("dataset source error = %v", err)
+	}
+	m = base()
+	m.Dataset.Tasks = nil
+	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "dataset.tasks") {
+		t.Fatalf("dataset tasks error = %v", err)
+	}
+	m = base()
+	m.Dataset.Tasks = []string{"a", "a"}
+	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate dataset task") {
+		t.Fatalf("duplicate task error = %v", err)
+	}
+	m = base()
+	m.Sandbox.Type = ""
+	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "sandbox.type: docker") {
+		t.Fatalf("sandbox requirement error = %v", err)
+	}
+	m = base()
+	m.Tasks = []Task{{ID: "x", Repo: "/tmp", Prompt: "p", Verifier: Command{Run: []string{"t"}}}}
+	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "cannot also define local tasks") {
+		t.Fatalf("local task conflict error = %v", err)
+	}
+	m = base()
+	m.Setup = Command{Run: []string{"make"}}
+	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "cannot define a local setup command") {
+		t.Fatalf("local setup conflict error = %v", err)
+	}
+
+	local := testManifest("/tmp/repo", "")
+	local.Sandbox = Sandbox{Type: "docker"}
+	if err := local.Validate(); err == nil || !strings.Contains(err.Error(), "sandbox is only supported alongside dataset") {
+		t.Fatalf("local manifest sandbox error = %v", err)
+	}
+}
+
+func TestDeterministicWinnerRequiresVerifier(t *testing.T) {
+	pass := CandidateResult{Verifier: VerifierResult{Ran: true, Passed: true}}
+	fail := CandidateResult{Verifier: VerifierResult{Ran: true}}
+	skipped := CandidateResult{Status: StatusTimeout, Verifier: VerifierResult{Skipped: "candidate timeout"}}
+	if got := deterministicWinner(pass, fail); got != WinnerBaseline {
+		t.Errorf("pass vs fail = %q", got)
+	}
+	if got := deterministicWinner(fail, pass); got != WinnerMUT {
+		t.Errorf("fail vs pass = %q", got)
+	}
+	if got := deterministicWinner(pass, pass); got != WinnerTie {
+		t.Errorf("pass vs pass = %q", got)
+	}
+	if got := deterministicWinner(pass, skipped); got != WinnerBaseline {
+		t.Errorf("pass vs skipped = %q", got)
+	}
+}
+
+type scriptExecutor struct {
+	setupErr     error
+	claudeErr    error
+	claudeStdout string
+	claudeDelay  time.Duration
+	judgeStdout  string
+	judgeErr     error
+	judgeDir     string
+	verifierErr  error
+	verifierRuns int
+}
+
+func (s *scriptExecutor) Run(ctx context.Context, dir string, _ []string, argv []string, _ io.Reader, stdout, _ io.Writer) error {
+	isClaude := strings.HasSuffix(argv[0], "claude")
+	isJudge := isClaude && containsArg(argv, "judge-model")
+	switch {
+	case isJudge:
+		s.judgeDir = dir
+		_, _ = stdout.Write([]byte(s.judgeStdout))
+		return s.judgeErr
+	case isClaude:
+		if s.claudeDelay > 0 {
+			select {
+			case <-time.After(s.claudeDelay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		_, _ = stdout.Write([]byte(s.claudeStdout))
+		return s.claudeErr
+	default:
+		if containsArg(argv, "setup") {
+			return s.setupErr
+		}
+		s.verifierRuns++
+		_, _ = stdout.Write([]byte("verifier ran"))
+		return s.verifierErr
+	}
+}
+
+func containsArg(argv []string, want string) bool {
+	for _, arg := range argv {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+func gitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "--quiet")
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", ".")
+	run("commit", "--quiet", "-m", "initial")
+	return dir
+}
+
+func headSHA(t *testing.T, repo string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func testManifest(repo, base string) *Manifest {
+	return &Manifest{Version: SchemaVersion, Name: "unit", Tasks: []Task{{
+		ID: "task-a", Repo: repo, Base: base, Prompt: "do the thing",
+		Verifier: Command{Run: []string{"verify"}, Timeout: time.Minute},
+	}}}
+}
+
+func TestPrepareWorkspaceChecksOutCommitSHA(t *testing.T) {
+	repo := gitRepo(t)
+	sha := headSHA(t, repo)
+	dst := filepath.Join(t.TempDir(), "work")
+	if err := prepareWorkspace(context.Background(), repo, sha, dst); err != nil {
+		t.Fatal(err)
+	}
+	if got := headSHA(t, dst); got != sha {
+		t.Errorf("checked out %s, want %s", got, sha)
+	}
+}
+
+func TestCandidateFailureSkipsVerifier(t *testing.T) {
+	repo := gitRepo(t)
+	ex := &scriptExecutor{claudeErr: exitError(t), claudeStdout: `{"result":"boom"}`}
+	runner := &Runner{Exec: ex, Options: Options{
+		Baseline: "a", MUT: "b", Judge: "none", OutputDir: t.TempDir(),
+		Timeout: time.Minute, ClaudeBin: "claude",
+	}}
+	s, err := runner.Run(context.Background(), testManifest(repo, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.verifierRuns != 0 {
+		t.Errorf("verifier ran %d times", ex.verifierRuns)
+	}
+	for _, c := range []CandidateResult{s.Pairs[0].Baseline, s.Pairs[0].MUT} {
+		if c.Status != StatusModelError || !c.ModelFailed() || c.Verifier.Ran || c.Verifier.Passed {
+			t.Errorf("candidate = %+v", c)
+		}
+	}
+}
+
+func TestInfraFailureSuppressesJudgeAndIsNotTie(t *testing.T) {
+	repo := gitRepo(t)
+	ex := &scriptExecutor{
+		setupErr:    exitError(t),
+		judgeStdout: `{"winner":"candidate_1","confidence":1,"reason":"bad","candidate_1_score":5,"candidate_2_score":1}`,
+	}
+	manifest := testManifest(repo, "")
+	manifest.Setup = Command{Run: []string{"setup"}}
+	runner := &Runner{Exec: ex, Options: Options{
+		Baseline: "a", MUT: "b", Judge: "judge-model", OutputDir: t.TempDir(),
+		Timeout: time.Minute, ClaudeBin: "claude",
+	}}
+	s, err := runner.Run(context.Background(), manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Pairs) != 1 || s.Pairs[0].Winner != WinnerInfraError {
+		t.Fatalf("pairs = %+v", s.Pairs)
+	}
+	if s.Pairs[0].Judge != nil || s.Pairs[0].JudgeError != "" {
+		t.Fatalf("judge ran or errored: %+v", s.Pairs[0])
+	}
+	if s.InfraPairs != 1 || s.InfraFailures != 1 || s.Ties != 0 || s.JudgeErrors != 0 {
+		t.Fatalf("summary = %+v", s)
+	}
+}
+
+func TestInfraFailureSuppressesJudgeWhenOnlyOneCandidateFails(t *testing.T) {
+	repo := gitRepo(t)
+	ex := &selectiveSetupExecutor{scriptExecutor: scriptExecutor{
+		setupErr:     exitError(t),
+		claudeStdout: `{"result":"done"}`,
+		judgeStdout:  `{"winner":"candidate_1","confidence":1,"reason":"bad","candidate_1_score":5,"candidate_2_score":1}`,
+	}}
+	manifest := testManifest(repo, "")
+	manifest.Setup = Command{Run: []string{"setup"}}
+	runner := &Runner{Exec: ex, Options: Options{
+		Baseline: "a", MUT: "b", Judge: "judge-model", OutputDir: t.TempDir(),
+		Timeout: time.Minute, ClaudeBin: "claude",
+	}}
+	s, err := runner.Run(context.Background(), manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := s.Pairs[0]
+	if p.Winner != WinnerInfraError || p.Judge != nil || p.JudgeError != "" || ex.judgeRuns != 0 {
+		t.Fatalf("pair = %+v, judge runs = %d", p, ex.judgeRuns)
+	}
+	infra, completed := p.Baseline, p.MUT
+	if !infra.InfraFailed() {
+		infra, completed = completed, infra
+	}
+	if !infra.InfraFailed() || completed.InfraFailed() || !completed.Verifier.Passed {
+		t.Fatalf("candidates = baseline %+v, mut %+v", p.Baseline, p.MUT)
+	}
+}
+
+type selectiveSetupExecutor struct {
+	scriptExecutor
+	setupRuns int
+	judgeRuns int
+}
+
+func (s *selectiveSetupExecutor) Run(ctx context.Context, dir string, env []string, argv []string, input io.Reader, stdout, stderr io.Writer) error {
+	if strings.HasSuffix(argv[0], "claude") && containsArg(argv, "judge-model") {
+		s.judgeRuns++
+	}
+	if containsArg(argv, "setup") {
+		s.setupRuns++
+		if s.setupRuns > 1 {
+			return nil
+		}
+	}
+	return s.scriptExecutor.Run(ctx, dir, env, argv, input, stdout, stderr)
+}
+
+func TestAggregateCountsSingleInfraPairForTwoFailedCandidates(t *testing.T) {
+	s := &Summary{Pairs: []PairResult{{
+		Winner:   WinnerInfraError,
+		Baseline: CandidateResult{Status: StatusSetupError},
+		MUT:      CandidateResult{Status: StatusWorkspaceError},
+	}}}
+	s.aggregate()
+	if s.InfraPairs != 1 || s.InfraFailures != 1 || s.Ties != 0 {
+		t.Fatalf("summary = %+v", s)
+	}
+}
+
+func TestJudgeRunsFromBlindedWorkspace(t *testing.T) {
+	repo := gitRepo(t)
+	ex := &scriptExecutor{
+		claudeStdout: `{"result":"done"}`,
+		judgeStdout:  `{"winner":"tie","confidence":1,"reason":"equal","candidate_1_score":3,"candidate_2_score":3}`,
+	}
+	out := t.TempDir()
+	runner := &Runner{Exec: ex, Options: Options{
+		Baseline: "a", MUT: "b", Judge: "judge-model", OutputDir: out,
+		Timeout: time.Minute, ClaudeBin: "claude",
+	}}
+	if _, err := runner.Run(context.Background(), testManifest(repo, "")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(ex.judgeDir, filepath.Join("judge", "workspace")) {
+		t.Fatalf("judge dir = %q, want isolated judge/workspace", ex.judgeDir)
+	}
+	entries, err := os.ReadDir(ex.judgeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("judge workspace contained identity-leaking artifacts: %v", entries)
+	}
+}
+
+func TestJudgeFailureIsRecordedAndRunContinues(t *testing.T) {
+	repo := gitRepo(t)
+	ex := &scriptExecutor{claudeStdout: `{"result":"done"}`, judgeStdout: "not json"}
+	runner := &Runner{Exec: ex, Options: Options{
+		Baseline: "a", MUT: "b", Judge: "judge-model", OutputDir: t.TempDir(),
+		Timeout: time.Minute, ClaudeBin: "claude", Attempts: 2,
+	}}
+	s, err := runner.Run(context.Background(), testManifest(repo, ""))
+	if err != nil {
+		t.Fatalf("judge error aborted run: %v", err)
+	}
+	if len(s.Pairs) != 2 || s.JudgeErrors != 2 || s.Ties != 0 {
+		t.Fatalf("summary = %+v", s)
+	}
+	for _, p := range s.Pairs {
+		if p.Winner != WinnerJudgeError || p.JudgeError == "" {
+			t.Errorf("pair = %+v", p)
+		}
+	}
+}
+
+func TestTelemetryPopulatesUsageAndRoutes(t *testing.T) {
+	dataDir := t.TempDir()
+	st, err := store.Open(filepath.Join(dataDir, "agentic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := sessionID(7, "task-a", 1, "baseline")
+	now := time.Now().Truncate(time.Second)
+	if err := st.RecordUsage(store.UsageEvent{TS: now, SessionID: sid, InputTokens: 100, OutputTokens: 20, CostUSD: 0.25, DurationMS: 900, Status: 200}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordRouteDecision(sid, "auto", "deep", "opus", "", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &Runner{Options: Options{DataDir: dataDir}}
+	usage, trace := r.telemetry(sid)
+	if usage.Requests != 1 || usage.InputTokens != 100 || usage.CostUSD != 0.25 || usage.DurationMS != 900 {
+		t.Errorf("usage = %+v", usage)
+	}
+	if len(trace) != 1 || trace[0].Model != "opus" || trace[0].Tier != "deep" {
+		t.Errorf("trace = %+v", trace)
+	}
+}
+
+func TestEvalEnvRoutesAndAttributes(t *testing.T) {
+	env := evalEnv([]string{"ANTHROPIC_API_KEY=bad"}, Options{BaseURL: "http://router", Token: "token", Profile: "main"}, "eval-1")
+	joined := strings.Join(env, "\n")
+	for _, want := range []string{"ANTHROPIC_BASE_URL=http://router", "ANTHROPIC_AUTH_TOKEN=token", "X-Agentic-Session: eval-1", "AGENTIC_SESSION_ID=eval-1"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("env missing %q: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "ANTHROPIC_API_KEY=") {
+		t.Errorf("api key was not removed")
+	}
+}
+
+func TestFinalText(t *testing.T) {
+	if got := finalText([]byte(`{"result":"hello"}`)); got != "hello" {
+		t.Fatalf("got %q", got)
+	}
+	if got := finalText(bytes.TrimSpace([]byte(" plain "))); got != "plain" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestCandidateArtifactIsDurable(t *testing.T) {
+	repo := gitRepo(t)
+	out := t.TempDir()
+	runner := &Runner{Exec: &scriptExecutor{claudeStdout: `{"result":"done"}`}, Options: Options{
+		Baseline: "a", MUT: "b", Judge: "none", OutputDir: out,
+		Timeout: time.Minute, ClaudeBin: "claude",
+	}}
+	if _, err := runner.Run(context.Background(), testManifest(repo, "")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(out, "tasks", "task-a", "attempt-001", "baseline", "candidate.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result CandidateResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != StatusComplete || !result.Verifier.Ran || !result.Verifier.Passed {
+		t.Errorf("result = %+v", result)
+	}
+}
+
+func exitError(t *testing.T) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", "exit 3").Run()
+	if err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	return err
+}

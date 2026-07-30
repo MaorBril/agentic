@@ -2,3 +2,10 @@
 *.log
 .env
 .env.*
+.agentic/evals/
+.DS_Store
+.claude/
+logs/
+__pycache__/
+*.pyc
+internal/eval/calls.txt
