@@ -184,6 +184,18 @@ agentic eval run examples/swebench-smoke.yaml \
 agentic eval report ~/.agentic/evals/swebench-smoke
 ```
 
+A real one-task run comparing `kimi-k3` against `opus` produced:
+
+```text
+swebench-smoke: baseline=opus mut=kimi-k3 judge=sonnet pairs=1
+wins: baseline 1 · mut 0 · ties 0 · judge errors 0 · infra pairs 0
+verifier passes: baseline 1 · mut 1 — run failures: baseline 0 · mut 0 · infra failures 0
+TASK                    ATTEMPT  WINNER    BASELINE       MUT
+astropy__astropy-14309  1        baseline  complete/pass  complete/pass
+```
+
+Both patches passed the official SWE-bench grader. The blinded judge preferred the baseline because it exactly matched the upstream fix and was narrower, while `kimi-k3` used a broader but still correct defensive fix. This is one smoke-test data point, not a statistically meaningful model ranking; use multiple tasks and attempts for comparisons you intend to act on.
+
 The adapter checks Python, the exact SWE-bench API, and Docker before making a model request. It asks the official harness to build or reuse each instance image, starts a fresh candidate container, installs the Linux Claude Code native binary there, extracts the patch, and submits it to the official grader in a separate clean container. SWE-bench 4.1.0 builds x86_64 images; Docker Desktop runs them under emulation on Apple Silicon. Initial image builds can take a while.
 
 Docker candidates reach the normal loopback-only router through a temporary relay. The relay binds an ephemeral host port for the eval duration, accepts only `/v1/*`, and requires the existing per-install router token. It shuts down when the run ends. Use `--keep-containers` only while debugging because it leaves candidate containers behind.
