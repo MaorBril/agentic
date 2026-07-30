@@ -43,6 +43,73 @@ func TestRouteDecisionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRouteEventsAreAppendOnly(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "agentic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	at := time.Now().Truncate(time.Second)
+	if err := st.RecordRouteDecision("sess-1", "auto", "deep", "opus", "first", at); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordRouteDecision("sess-1", "auto", "light", "qwen", "second", at); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordRouteDecision("sess-2", "auto", "standard", "sonnet", "other", at); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := st.RouteEvents("sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want two", events)
+	}
+	if events[0].Model != "opus" || events[0].Reason != "first" || events[1].Model != "qwen" || events[1].Reason != "second" {
+		t.Errorf("events = %+v, want insertion order", events)
+	}
+	if other, err := st.RouteEvents("sess-2"); err != nil || len(other) != 1 || other[0].Model != "sonnet" {
+		t.Errorf("other events = %+v, err=%v", other, err)
+	}
+}
+
+func TestSessionUsageIncludesDuration(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "agentic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	at := time.Now().Truncate(time.Second)
+	want := UsageEvent{
+		TS: at, SessionID: "sess-1", Profile: "main", Provider: "anthropic",
+		Model: "claude", Alias: "opus", InputTokens: 10, OutputTokens: 20,
+		CacheReadTokens: 3, CacheWriteTokens: 4, CostUSD: 0.5, Priced: true,
+		RequestID: "req-1", Status: 200, CtxBudget: 1000, ReportedInput: 17,
+		DurationMS: 1234,
+	}
+	if err := st.RecordUsage(want); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordUsage(UsageEvent{TS: at, SessionID: "sess-2", DurationMS: 99}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.SessionUsage("sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("usage = %+v, want one", got)
+	}
+	if got[0].DurationMS != 1234 || got[0].InputTokens != 10 || got[0].ReportedInput != 17 || !got[0].Priced {
+		t.Errorf("usage = %+v", got[0])
+	}
+}
+
 func TestGoalDecisionRoundTrip(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "agentic.db"))
 	if err != nil {

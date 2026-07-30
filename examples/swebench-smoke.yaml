@@ -1,0 +1,12 @@
+version: 1
+name: swebench-smoke
+
+dataset:
+  type: swebench
+  source: princeton-nlp/SWE-bench_Verified
+  split: test
+  tasks:
+    - astropy__astropy-14309
+
+sandbox:
+  type: docker

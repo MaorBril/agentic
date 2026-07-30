@@ -79,6 +79,15 @@ CREATE TABLE IF NOT EXISTS route_decisions (
   model      TEXT,
   at         INTEGER
 );
+CREATE TABLE IF NOT EXISTS route_events (
+  id         INTEGER PRIMARY KEY,
+  ts         INTEGER NOT NULL,
+  session_id TEXT,
+  alias      TEXT,
+  tier       TEXT,
+  model      TEXT,
+  reason     TEXT
+);
 CREATE TABLE IF NOT EXISTS goal_decisions (
   session_id TEXT PRIMARY KEY,
   goal       INTEGER,
@@ -87,6 +96,7 @@ CREATE TABLE IF NOT EXISTS goal_decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_events(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_route_events_session ON route_events(session_id, ts, id);
 `)
 	if err != nil {
 		return err
@@ -98,6 +108,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id);
 	for _, col := range []string{
 		"ALTER TABLE usage_events ADD COLUMN ctx_budget INTEGER DEFAULT 0",
 		"ALTER TABLE usage_events ADD COLUMN reported_input INTEGER DEFAULT 0",
+		"ALTER TABLE usage_events ADD COLUMN duration_ms INTEGER DEFAULT 0",
 		"ALTER TABLE route_decisions ADD COLUMN reason TEXT DEFAULT ''",
 	} {
 		if _, err := s.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -125,18 +136,19 @@ type UsageEvent struct {
 	ErrType          string
 	CtxBudget        int   // model's context budget (0 = unknown/unscaled)
 	ReportedInput    int64 // input-side tokens as reported to the client
+	DurationMS       int64 // end-to-end router request duration
 }
 
 func (s *Store) RecordUsage(e UsageEvent) error {
 	_, err := s.db.Exec(`INSERT INTO usage_events
 (ts, session_id, profile, provider, model, model_alias,
  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
- cost_usd, priced, request_id, status, err_type, ctx_budget, reported_input)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+ cost_usd, priced, request_id, status, err_type, ctx_budget, reported_input, duration_ms)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		e.TS.Unix(), e.SessionID, e.Profile, e.Provider, e.Model, e.Alias,
 		e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens,
 		e.CostUSD, boolToInt(e.Priced), e.RequestID, e.Status, e.ErrType,
-		e.CtxBudget, e.ReportedInput)
+		e.CtxBudget, e.ReportedInput, e.DurationMS)
 	return err
 }
 
@@ -194,10 +206,22 @@ FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC`)
 // note — e.g. "size:light→standard" when size-aware routing remapped a tier
 // — empty for a plain classifier decision.
 func (s *Store) RecordRouteDecision(sessionID, alias, tier, model, reason string, at time.Time) error {
-	_, err := s.db.Exec(`INSERT OR REPLACE INTO route_decisions
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO route_decisions
 (session_id, alias, tier, model, reason, at) VALUES (?,?,?,?,?,?)`,
-		sessionID, alias, tier, model, reason, at.Unix())
-	return err
+		sessionID, alias, tier, model, reason, at.Unix()); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO route_events
+(ts, session_id, alias, tier, model, reason) VALUES (?,?,?,?,?,?)`,
+		at.Unix(), sessionID, alias, tier, model, reason); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // LatestRouteDecision returns the most recent auto-router decision recorded
@@ -206,10 +230,48 @@ func (s *Store) RecordRouteDecision(sessionID, alias, tier, model, reason string
 func (s *Store) LatestRouteDecision(sessionID string) (alias, tier, model, reason string, ok bool, err error) {
 	row := s.db.QueryRow(`SELECT alias, tier, model, reason FROM route_decisions WHERE session_id = ?`, sessionID)
 	err = row.Scan(&alias, &tier, &model, &reason)
+	if err != nil && strings.Contains(err.Error(), "no such column: reason") {
+		// Read-only clients may briefly attach to an older router leader that
+		// has not restarted to run the additive reason-column migration yet.
+		// Preserve the decision itself and leave reason empty.
+		reason = ""
+		err = s.db.QueryRow(`SELECT alias, tier, model FROM route_decisions WHERE session_id = ?`, sessionID).Scan(&alias, &tier, &model)
+	}
 	if err == sql.ErrNoRows {
 		return "", "", "", "", false, nil
 	}
 	return alias, tier, model, reason, err == nil, err
+}
+
+// RouteEvent is one append-only routing decision. Unlike route_decisions,
+// these rows preserve every turn for evaluation and post-hoc analysis.
+type RouteEvent struct {
+	TS        time.Time
+	SessionID string
+	Alias     string
+	Tier      string
+	Model     string
+	Reason    string
+}
+
+func (s *Store) RouteEvents(sessionID string) ([]RouteEvent, error) {
+	rows, err := s.db.Query(`SELECT ts, session_id, alias, tier, model, reason
+FROM route_events WHERE session_id = ? ORDER BY ts, id`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RouteEvent
+	for rows.Next() {
+		var e RouteEvent
+		var ts int64
+		if err := rows.Scan(&ts, &e.SessionID, &e.Alias, &e.Tier, &e.Model, &e.Reason); err != nil {
+			return nil, err
+		}
+		e.TS = time.Unix(ts, 0)
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // RecordGoalDecision persists the auto-goal classifier's verdict for a
@@ -266,6 +328,34 @@ FROM usage_events WHERE session_id = ? ORDER BY ts, id`, sessionID)
 			return nil, err
 		}
 		e.TS = time.Unix(ts, 0)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// SessionUsage returns raw request records for an attributed session. These
+// rows let evaluation artifacts report exact token, cost, and latency totals.
+func (s *Store) SessionUsage(sessionID string) ([]UsageEvent, error) {
+	rows, err := s.db.Query(`SELECT ts, session_id, profile, provider, model, model_alias,
+  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
+  priced, request_id, status, err_type, ctx_budget, reported_input, duration_ms
+FROM usage_events WHERE session_id = ? ORDER BY ts, id`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UsageEvent
+	for rows.Next() {
+		var e UsageEvent
+		var ts int64
+		var priced int
+		if err := rows.Scan(&ts, &e.SessionID, &e.Profile, &e.Provider, &e.Model, &e.Alias,
+			&e.InputTokens, &e.OutputTokens, &e.CacheReadTokens, &e.CacheWriteTokens, &e.CostUSD,
+			&priced, &e.RequestID, &e.Status, &e.ErrType, &e.CtxBudget, &e.ReportedInput, &e.DurationMS); err != nil {
+			return nil, err
+		}
+		e.TS = time.Unix(ts, 0)
+		e.Priced = priced != 0
 		out = append(out, e)
 	}
 	return out, rows.Err()

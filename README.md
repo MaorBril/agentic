@@ -137,6 +137,61 @@ agentic models add glm  --provider z --id glm-4.7 --context-window 200000 --effe
 
 `effective_context` is the attention knob: the client compacts at 60K real tokens even though the window is nominally 200K, keeping the model in its coherent range. Pricing and budgets always record true usage; `agentic context` shows a session's true-vs-reported trajectory for tuning these numbers. Details and research methodology: [docs/context-scaling.md](docs/context-scaling.md).
 
+## Model evaluations
+
+`agentic eval` compares a baseline model with a model under test on the same coding tasks. Each arm runs non-interactive Claude Code in isolation, records router usage and route decisions under its own session ID, and produces a patch. An optional judge sees blinded patches and verifier evidence; it never sees model names, cost, or execution order.
+
+There are two executor types. A local manifest supplies its repository, setup command, and verifier directly:
+
+```yaml
+version: 1
+name: local-sample
+tasks:
+  - id: django-11001
+    repo: /path/to/prepared/django
+    base: main
+    prompt: Fix the issue described in this task. Run relevant tests.
+    verifier:
+      run: [python, -m, pytest, tests/example_test.py]
+      timeout: 10m
+```
+
+A SWE-bench manifest delegates repository checkout, dependency setup, official task images, test-patch application, and FAIL_TO_PASS/PASS_TO_PASS grading to the pinned official harness:
+
+```yaml
+version: 1
+name: swebench-smoke
+dataset:
+  type: swebench
+  source: princeton-nlp/SWE-bench_Verified
+  split: test
+  tasks:
+    - astropy__astropy-14309
+sandbox:
+  type: docker
+```
+
+The same manifest is in [`examples/swebench-smoke.yaml`](examples/swebench-smoke.yaml). SWE-bench runs require Docker and Python 3.10 or newer with the exact supported package version:
+
+```bash
+python3 -m venv ~/.agentic/swebench-venv
+~/.agentic/swebench-venv/bin/pip install 'swebench==4.1.0'
+
+agentic eval run examples/swebench-smoke.yaml \
+  --python ~/.agentic/swebench-venv/bin/python \
+  --baseline opus --mut auto --judge sonnet \
+  --attempts 1 --timeout 45m --output ~/.agentic/evals/swebench-smoke
+agentic eval report ~/.agentic/evals/swebench-smoke
+```
+
+The adapter checks Python, the exact SWE-bench API, and Docker before making a model request. It asks the official harness to build or reuse each instance image, starts a fresh candidate container, installs the Linux Claude Code native binary there, extracts the patch, and submits it to the official grader in a separate clean container. SWE-bench 4.1.0 builds x86_64 images; Docker Desktop runs them under emulation on Apple Silicon. Initial image builds can take a while.
+
+Docker candidates reach the normal loopback-only router through a temporary relay. The relay binds an ephemeral host port for the eval duration, accepts only `/v1/*`, and requires the existing per-install router token. It shuts down when the run ends. Use `--keep-containers` only while debugging because it leaves candidate containers behind.
+
+Use `--task id` to select instances, `--seed` to reproduce launch order and judge blinding, `--resume` to skip completed pairs, and `--json` for machine-readable output. Infrastructure failures are unscored and never sent to the judge; `--resume` retries those pairs. `--judge none` decides only from verifier pass/fail, with equal outcomes recorded as ties.
+
+Artifacts include raw Claude output, patches, container logs, official SWE-bench reports, FAIL_TO_PASS/PASS_TO_PASS details, blinded judge mappings, per-candidate usage and route traces, pair results, the resolved dataset metadata/fingerprint, and `summary.json`. Local setup and verifier commands execute on the host, so review third-party local manifests before running them.
+
 ## Budgets
 
 Daily, weekly, and monthly caps — global and per profile. When a cap is hit, the router refuses the *next* request with a clear message that shows up right in the Claude Code TUI; in-flight responses are never cut. Warnings surface in the statusline (`agentic setup` registers it), which shows live session and daily spend:
@@ -179,6 +234,7 @@ If [clauder](https://github.com/MaorBril/clauder) is installed, agentic launches
 | `agentic setup` | first-run config, token, statusline registration |
 | `agentic cost [--week\|--month] [--by model\|profile\|session]` | spend report |
 | `agentic context [session-id]` | context-fullness trajectory (true vs reported tokens) |
+| `agentic eval run/report` | paired model evaluation and artifact report |
 | `agentic agents list/sync` | subagent definitions for your model aliases |
 | `agentic models add/list/remove/test/update-prices` | model aliases |
 | `agentic providers add/list/remove` | upstream providers |

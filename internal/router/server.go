@@ -247,6 +247,7 @@ func (s *Server) recordUsage(r *http.Request, route config.Resolved, alias strin
 		ErrType:          res.ErrType,
 		CtxBudget:        budget,
 		ReportedInput:    res.ReportedInput,
+		DurationMS:       dur.Milliseconds(),
 	}
 	if err := s.store.RecordUsage(ev); err != nil {
 		s.log.Warn("usage insert failed", "err", err)
