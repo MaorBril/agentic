@@ -30,6 +30,7 @@ func normalizeForModel(m map[string]any, model string) {
 	// ^[A-Za-z0-9_-]+$; normalize the pair in-flight so already-persisted
 	// transcripts recover automatically without destructive file edits.
 	sanitizeToolIDs(m)
+	stripUnsignedThinking(m)
 
 	switch {
 	case strings.HasPrefix(model, "claude-fable") || strings.HasPrefix(model, "claude-mythos"):
@@ -103,6 +104,79 @@ func hasInvalidToolID(raw []byte) bool {
 		}
 	}
 	return false
+}
+
+// hasUnsignedThinking reports whether translated reasoning has been replayed
+// as an Anthropic thinking block without a real signature. Claude Code keeps
+// response blocks in history; Anthropic rejects these display-only blocks on
+// a later cross-tier turn unless the passthrough takes the repair path.
+func hasUnsignedThinking(raw []byte) bool {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	msgs, _ := m["messages"].([]any)
+	for _, rawMsg := range msgs {
+		msg, _ := rawMsg.(map[string]any)
+		if msg["role"] != "assistant" {
+			continue
+		}
+		blocks, _ := msg["content"].([]any)
+		for _, rawBlock := range blocks {
+			block, _ := rawBlock.(map[string]any)
+			if block["type"] == "thinking" && !hasThinkingSignature(block) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// stripUnsignedThinking removes only display-only reasoning minted by an
+// OpenAI-compatible backend. Genuine Anthropic thinking has a non-empty
+// signature and must be replayed byte-for-byte; redacted_thinking uses a
+// different data field and is never touched.
+func stripUnsignedThinking(m map[string]any) {
+	msgs, ok := m["messages"].([]any)
+	if !ok {
+		return
+	}
+	for _, rawMsg := range msgs {
+		msg, ok := rawMsg.(map[string]any)
+		if !ok || msg["role"] != "assistant" {
+			continue
+		}
+		blocks, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
+		out := make([]any, 0, len(blocks))
+		var reasoning string
+		for _, rawBlock := range blocks {
+			block, ok := rawBlock.(map[string]any)
+			if !ok || block["type"] != "thinking" || hasThinkingSignature(block) {
+				out = append(out, rawBlock)
+				continue
+			}
+			if text, ok := block["thinking"].(string); ok && strings.TrimSpace(text) != "" {
+				if reasoning != "" {
+					reasoning += "\n"
+				}
+				reasoning += text
+			}
+		}
+		if len(out) == 0 && reasoning != "" {
+			// A reasoning-only translated response would otherwise become an
+			// invalid empty assistant message. Preserve it as ordinary context.
+			out = append(out, map[string]any{"type": "text", "text": reasoning})
+		}
+		msg["content"] = out
+	}
+}
+
+func hasThinkingSignature(block map[string]any) bool {
+	signature, ok := block["signature"].(string)
+	return ok && signature != ""
 }
 
 // sanitizeToolIDs rewrites every invalid tool_use.id and
