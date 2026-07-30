@@ -35,8 +35,11 @@ func (b *Backend) CountTokens(ctx context.Context, call *backend.Call, w http.Re
 func (b *Backend) forward(ctx context.Context, call *backend.Call, w http.ResponseWriter, path string, tee bool) backend.Result {
 	body := call.Raw
 	// Byte-faithful when the alias already is the upstream model id —
-	// cache_control, thinking blocks, and unknown future fields survive.
-	if call.Envelope.Model != call.Route.Model.ID {
+	// cache_control, thinking blocks, and unknown future fields survive. The
+	// exception is a poisoned history containing a non-Anthropic tool id
+	// (e.g. vLLM's "Bash:0"): that request must be parsed so the matching
+	// tool_use/tool_result ids can be repaired before Anthropic rejects it.
+	if call.Envelope.Model != call.Route.Model.ID || hasInvalidToolID(call.Raw) {
 		var err error
 		body, err = rewriteForModel(call.Raw, call.Route.Model.ID)
 		if err != nil {

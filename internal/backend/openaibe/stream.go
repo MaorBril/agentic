@@ -231,6 +231,8 @@ func (s *streamState) openToolBlock() {
 	id := s.pendingID
 	if id == "" {
 		id = "toolu_agentic_missing"
+	} else {
+		id = sanitizeToolUseID(id)
 	}
 	s.sse.Event("content_block_start", map[string]any{
 		"type": "content_block_start", "index": s.index,

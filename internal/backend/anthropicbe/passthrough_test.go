@@ -66,6 +66,35 @@ func TestByteFaithfulPassthrough(t *testing.T) {
 	}
 }
 
+func TestPoisonedToolIDsAreRepairedForAnthropic(t *testing.T) {
+	body := `{"model":"claude-sonnet-5","max_tokens":100,"messages":[` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"Bash:0","name":"Bash","input":{"command":"ls"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"Bash:0","content":"ok"}]}` +
+		`]}`
+	var got map[string]any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		w.Write([]byte(`{"usage":{}}`))
+	}))
+	defer up.Close()
+
+	// alias == upstream model: this normally takes the byte-faithful path,
+	// but a poisoned history must be rewritten so an existing session can
+	// recover without editing its transcript on disk.
+	call := mkCall(t, body, up.URL, "claude-sonnet-5")
+	New().Messages(context.Background(), call, httptest.NewRecorder())
+
+	msgs := got["messages"].([]any)
+	toolUse := msgs[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	toolResult := msgs[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if toolUse["id"] != "Bash_0" || toolResult["tool_use_id"] != "Bash_0" {
+		t.Fatalf("matching ids not repaired: tool_use=%v tool_result=%v", toolUse["id"], toolResult["tool_use_id"])
+	}
+}
+
 func TestModelRewriteOnlyTouchesModel(t *testing.T) {
 	body := `{"model":"cheap","max_tokens":100,"temperature":0.5,"messages":[]}`
 	var gotBody map[string]json.RawMessage

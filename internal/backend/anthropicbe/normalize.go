@@ -24,6 +24,13 @@ func rewriteForModel(raw []byte, model string) ([]byte, error) {
 }
 
 func normalizeForModel(m map[string]any, model string) {
+	// A history may contain tool ids emitted earlier by an OpenAI-compatible
+	// backend (notably vLLM ids like "Bash:0"). Anthropic validates both
+	// tool_use.id and matching tool_result.tool_use_id against
+	// ^[A-Za-z0-9_-]+$; normalize the pair in-flight so already-persisted
+	// transcripts recover automatically without destructive file edits.
+	sanitizeToolIDs(m)
+
 	switch {
 	case strings.HasPrefix(model, "claude-fable") || strings.HasPrefix(model, "claude-mythos"):
 		// Thinking is always on; any explicit config (enabled, disabled,
@@ -68,6 +75,101 @@ func normalizeForModel(m map[string]any, model string) {
 
 // supportsEffort reports whether the model accepts output_config.effort
 // (Opus 4.5+, Sonnet 4.6+, Fable/Mythos; Haiku and older Sonnets reject it).
+// hasInvalidToolID reports whether raw request history contains a tool id
+// outside Anthropic's accepted character set. It intentionally parses only
+// the small envelope needed to preserve byte-faithful passthrough for clean
+// requests; malformed JSON is handled later by rewriteForModel.
+func hasInvalidToolID(raw []byte) bool {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	msgs, _ := m["messages"].([]any)
+	for _, rawMsg := range msgs {
+		msg, _ := rawMsg.(map[string]any)
+		blocks, _ := msg["content"].([]any)
+		for _, rawBlock := range blocks {
+			block, _ := rawBlock.(map[string]any)
+			var id string
+			switch block["type"] {
+			case "tool_use":
+				id, _ = block["id"].(string)
+			case "tool_result":
+				id, _ = block["tool_use_id"].(string)
+			}
+			if id != "" && validToolID(id) != id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sanitizeToolIDs rewrites every invalid tool_use.id and
+// tool_result.tool_use_id in messages[] with the same deterministic mapping,
+// preserving their references while satisfying Anthropic's id validation.
+func sanitizeToolIDs(m map[string]any) {
+	msgs, ok := m["messages"].([]any)
+	if !ok {
+		return
+	}
+	for _, raw := range msgs {
+		msg, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		blocks, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawBlock := range blocks {
+			block, ok := rawBlock.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch block["type"] {
+			case "tool_use":
+				if id, ok := block["id"].(string); ok {
+					block["id"] = validToolID(id)
+				}
+			case "tool_result":
+				if id, ok := block["tool_use_id"].(string); ok {
+					block["tool_use_id"] = validToolID(id)
+				}
+			}
+		}
+	}
+}
+
+func validToolID(id string) string {
+	if id == "" {
+		return "toolu_agentic_missing"
+	}
+	clean := true
+	for _, r := range id {
+		if !validToolIDRune(r) {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return id
+	}
+	out := make([]rune, 0, len(id))
+	for _, r := range id {
+		if validToolIDRune(r) {
+			out = append(out, r)
+		} else {
+			out = append(out, '_')
+		}
+	}
+	return string(out)
+}
+
+func validToolIDRune(r rune) bool {
+	return r == '_' || r == '-' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+}
+
 func supportsEffort(model string) bool {
 	for _, prefix := range []string{
 		"claude-fable", "claude-mythos",
