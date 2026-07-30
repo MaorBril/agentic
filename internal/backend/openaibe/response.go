@@ -61,7 +61,38 @@ func toolUseID(id string) string {
 	if id == "" {
 		return "toolu_agentic_missing"
 	}
-	return id
+	return sanitizeToolUseID(id)
+}
+
+// sanitizeToolUseID maps an upstream tool-call id onto the character set the
+// Anthropic API validates tool_use.id against (letters, digits, "_", "-").
+// vLLM and some OpenAI-compatible backends emit ids like "Bash:0" —
+// Claude Code persists that block verbatim into its transcript, and once
+// persisted, every future turn that resends it to a real Anthropic model
+// 400s on invalid_request_error until the transcript is edited by hand. This
+// keeps the id round-trippable (translateMessage's reverse direction reads
+// the same string back off tool_result.tool_use_id) while guaranteeing it
+// can never reach Anthropic's API unsanitized.
+func sanitizeToolUseID(id string) string {
+	clean := true
+	for _, r := range id {
+		if !(r == '_' || r == '-' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return id
+	}
+	out := make([]rune, 0, len(id))
+	for _, r := range id {
+		if r == '_' || r == '-' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			out = append(out, r)
+		} else {
+			out = append(out, '_')
+		}
+	}
+	return string(out)
 }
 
 func mapFinishReason(fr string, hasToolCalls bool) string {

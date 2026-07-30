@@ -232,3 +232,48 @@ func TestRepairJSON(t *testing.T) {
 		}
 	}
 }
+
+// Anthropic's API validates tool_use.id against ^[A-Za-z0-9_-]+$. vLLM and
+// some other OpenAI-compatible backends emit ids like "Bash:0" — passed
+// through unsanitized, Claude Code persists that into its transcript, and
+// every later turn that resends the history to a real Anthropic model 400s
+// on invalid_request_error until the transcript is hand-edited.
+func TestToolUseIDSanitizesInvalidCharacters(t *testing.T) {
+	cases := map[string]string{
+		"Bash:0":                      "Bash_0",
+		"TaskOutput:12":               "TaskOutput_12",
+		"call_a":                      "call_a",
+		"toolu_1":                     "toolu_1",
+		"":                            "toolu_agentic_missing",
+		"functions.read_file:0":       "functions_read_file_0",
+		"mcp__clauder__get_context:0": "mcp__clauder__get_context_0",
+	}
+	for in, want := range cases {
+		if got := toolUseID(in); got != want {
+			t.Errorf("toolUseID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestResponseTranslationSanitizesToolCallID(t *testing.T) {
+	resp := &openai.ChatResponse{
+		ID: "chatcmpl-abc",
+		Choices: []openai.Choice{{
+			Message: openai.ResponseMessage{
+				Role: "assistant",
+				ToolCalls: []openai.ToolCall{{
+					ID: "Bash:0", Type: "function",
+					Function: openai.FunctionCall{Name: "Bash", Arguments: `{"command":"ls"}`},
+				}},
+			},
+			FinishReason: "tool_calls",
+		}},
+	}
+	out, err := TranslateResponse(resp, "gpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Content[0].ID != "Bash_0" {
+		t.Errorf("tool_use.id = %q, want sanitized id without colon", out.Content[0].ID)
+	}
+}

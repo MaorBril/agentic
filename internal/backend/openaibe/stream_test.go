@@ -195,6 +195,26 @@ func TestStreamSplitToolHeader(t *testing.T) {
 	}
 }
 
+// Anthropic's tool_use.id must match ^[A-Za-z0-9_-]+$; vLLM-style ids like
+// "Bash:0" persisted verbatim into Claude Code's transcript 400 on every
+// later turn that resends the history to a real Anthropic model.
+func TestStreamOpenToolBlockSanitizesID(t *testing.T) {
+	evs := runStream(t, []string{
+		`{"id":"c9","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"Bash:0","function":{"name":"Bash","arguments":"{}"}}]}}]}`,
+		`{"id":"c9","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	})
+	for _, e := range evs {
+		if e.name == "content_block_start" {
+			cb := e.data["content_block"].(map[string]any)
+			if cb["type"] == "tool_use" {
+				if cb["id"] != "Bash_0" {
+					t.Errorf("tool_use id = %v, want sanitized \"Bash_0\"", cb["id"])
+				}
+			}
+		}
+	}
+}
+
 func TestStreamToolCallsWithoutIndex(t *testing.T) {
 	// Providers that omit tool_calls[].index (some xAI/OpenRouter/vLLM
 	// builds) signal a new call with a fresh id; args-only fragments carry
