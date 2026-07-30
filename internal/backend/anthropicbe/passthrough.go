@@ -36,10 +36,10 @@ func (b *Backend) forward(ctx context.Context, call *backend.Call, w http.Respon
 	body := call.Raw
 	// Byte-faithful when the alias already is the upstream model id —
 	// cache_control, thinking blocks, and unknown future fields survive. The
-	// exception is a poisoned history containing a non-Anthropic tool id
-	// (e.g. vLLM's "Bash:0"): that request must be parsed so the matching
-	// tool_use/tool_result ids can be repaired before Anthropic rejects it.
-	if call.Envelope.Model != call.Route.Model.ID || hasInvalidToolID(call.Raw) {
+	// exceptions are poisoned history from a translated backend: invalid
+	// tool ids (e.g. vLLM's "Bash:0") and unsigned display-only thinking.
+	// Those requests must be parsed and repaired before Anthropic rejects them.
+	if call.Envelope.Model != call.Route.Model.ID || hasInvalidToolID(call.Raw) || hasUnsignedThinking(call.Raw) {
 		var err error
 		body, err = rewriteForModel(call.Raw, call.Route.Model.ID)
 		if err != nil {

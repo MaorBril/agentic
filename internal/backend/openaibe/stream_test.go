@@ -164,6 +164,15 @@ func TestStreamReasoningContent(t *testing.T) {
 	if strings.Join(seen, " ") != want {
 		t.Errorf("block sequence:\n got %s\nwant %s", strings.Join(seen, " "), want)
 	}
+	for _, e := range evs {
+		if e.name != "content_block_delta" {
+			continue
+		}
+		delta := e.data["delta"].(map[string]any)
+		if delta["type"] == "signature_delta" && delta["signature"] != "" {
+			t.Errorf("translated thinking signature = %v, want empty display-only marker", delta["signature"])
+		}
+	}
 }
 
 func TestStreamSplitToolHeader(t *testing.T) {

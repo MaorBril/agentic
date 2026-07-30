@@ -95,6 +95,102 @@ func TestPoisonedToolIDsAreRepairedForAnthropic(t *testing.T) {
 	}
 }
 
+func TestUnsignedThinkingIsRepairedForAnthropic(t *testing.T) {
+	cases := []struct {
+		name     string
+		thinking string
+	}{
+		{"absent signature", `{"type":"thinking","thinking":"translated reasoning"}`},
+		{"empty signature", `{"type":"thinking","thinking":"translated reasoning","signature":""}`},
+		{"null signature", `{"type":"thinking","thinking":"translated reasoning","signature":null}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"claude-sonnet-5","max_tokens":100,"messages":[` +
+				`{"role":"user","content":"hi"},` +
+				`{"role":"assistant","content":[` + tc.thinking + `,{"type":"text","text":"answer"}]},` +
+				`{"role":"user","content":"continue"}]}`
+			var got map[string]any
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				if err := json.Unmarshal(raw, &got); err != nil {
+					t.Fatal(err)
+				}
+				w.Write([]byte(`{"usage":{}}`))
+			}))
+			defer up.Close()
+
+			// alias == upstream normally stays byte-faithful; unsigned thinking
+			// must still force normalization so existing transcripts self-heal.
+			call := mkCall(t, body, up.URL, "claude-sonnet-5")
+			New().Messages(context.Background(), call, httptest.NewRecorder())
+
+			blocks := got["messages"].([]any)[1].(map[string]any)["content"].([]any)
+			if len(blocks) != 1 || blocks[0].(map[string]any)["type"] != "text" {
+				t.Fatalf("assistant content = %#v, want only text", blocks)
+			}
+		})
+	}
+}
+
+func TestThinkingRepairPreservesAnthropicBlocks(t *testing.T) {
+	body := `{"model":"alias","max_tokens":100,"messages":[` +
+		`{"role":"assistant","content":[` +
+		`{"type":"thinking","thinking":"signed","signature":"sig_abc"},` +
+		`{"type":"redacted_thinking","data":"encrypted"},` +
+		`{"type":"text","text":"answer"}]},` +
+		`{"role":"user","content":[{"type":"thinking","thinking":"user content"}]}]}`
+	var got map[string]any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		w.Write([]byte(`{"usage":{}}`))
+	}))
+	defer up.Close()
+
+	// Alias rewrite exercises normalizeForModel without requiring poison.
+	call := mkCall(t, body, up.URL, "claude-sonnet-5")
+	New().Messages(context.Background(), call, httptest.NewRecorder())
+
+	msgs := got["messages"].([]any)
+	assistant := msgs[0].(map[string]any)["content"].([]any)
+	if len(assistant) != 3 || assistant[0].(map[string]any)["signature"] != "sig_abc" ||
+		assistant[1].(map[string]any)["type"] != "redacted_thinking" {
+		t.Fatalf("signed/redacted thinking changed: %#v", assistant)
+	}
+	user := msgs[1].(map[string]any)["content"].([]any)
+	if len(user) != 1 || user[0].(map[string]any)["type"] != "thinking" {
+		t.Fatalf("user content changed: %#v", user)
+	}
+}
+
+func TestReasoningOnlyAssistantBecomesText(t *testing.T) {
+	body := `{"model":"claude-sonnet-5","max_tokens":100,"messages":[` +
+		`{"role":"user","content":"hi"},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"translated reasoning","signature":""}]},` +
+		`{"role":"user","content":"continue"}]}`
+	var got map[string]any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		w.Write([]byte(`{"usage":{}}`))
+	}))
+	defer up.Close()
+
+	call := mkCall(t, body, up.URL, "claude-sonnet-5")
+	New().Messages(context.Background(), call, httptest.NewRecorder())
+
+	blocks := got["messages"].([]any)[1].(map[string]any)["content"].([]any)
+	if len(blocks) != 1 || blocks[0].(map[string]any)["type"] != "text" ||
+		blocks[0].(map[string]any)["text"] != "translated reasoning" {
+		t.Fatalf("assistant content = %#v", blocks)
+	}
+}
+
 func TestModelRewriteOnlyTouchesModel(t *testing.T) {
 	body := `{"model":"cheap","max_tokens":100,"temperature":0.5,"messages":[]}`
 	var gotBody map[string]json.RawMessage

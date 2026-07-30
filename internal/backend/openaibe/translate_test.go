@@ -206,6 +206,15 @@ func TestResponseTranslation(t *testing.T) {
 	if out.Content[0].Type != "thinking" || out.Content[1].Type != "text" || out.Content[2].Type != "tool_use" {
 		t.Fatalf("block order: %+v", out.Content)
 	}
+	// Translated reasoning is display-only: ContentBlock intentionally has no
+	// signature field, so native Anthropic replay can identify and strip it.
+	encoded, err := json.Marshal(out.Content[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"signature"`) {
+		t.Errorf("translated thinking unexpectedly has a signature: %s", encoded)
+	}
 	// truncated arguments repaired
 	var input map[string]any
 	if err := json.Unmarshal(out.Content[2].Input, &input); err != nil || input["path"] != "a.go" {
