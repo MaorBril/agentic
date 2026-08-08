@@ -73,6 +73,6 @@ case ":$PATH:" in
 esac
 
 prompt_install claude "claude CLI" https://claude.ai/install.sh bash
-prompt_install clauder clauder https://raw.githubusercontent.com/MaorBril/clauder/main/install.sh sh
+prompt_install clauder "clauder (persistent memory, optional)" https://raw.githubusercontent.com/MaorBril/clauder/main/install.sh sh
 
 echo "Next: agentic setup"

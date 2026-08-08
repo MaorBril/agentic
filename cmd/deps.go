@@ -18,9 +18,11 @@ func ensureClaude() bool {
 }
 
 // ensureClauder checks for the clauder binary and, if missing, offers to
-// install it. clauder is optional — agentic works without it.
+// install it. clauder is optional — agentic works without it, and since
+// Claude Code gained native cross-instance messaging it is wanted only for
+// persistent memory.
 func ensureClauder() bool {
-	return promptInstall("clauder", "clauder", false,
+	return promptInstall("clauder", "clauder (persistent memory)", false,
 		"curl -fsSL https://raw.githubusercontent.com/MaorBril/clauder/main/install.sh | sh",
 		"https://github.com/MaorBril/clauder")
 }

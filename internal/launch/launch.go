@@ -24,8 +24,7 @@ import (
 type Options struct {
 	Profile      string
 	ModelFlag    string // one-shot main-model override (alias)
-	InstanceName string // forwarded to clauder wrap
-	NoClauder    bool
+	InstanceName string // forwarded to claude as --name
 	Passthrough  bool
 	ClaudeArgs   []string
 }
@@ -151,19 +150,34 @@ func Run(ctx context.Context, cfg *config.Config, dataDir string, opts Options, 
 	return err
 }
 
-// buildChild prefers `clauder wrap` when available so cross-instance
-// messaging works; env vars pass through its PTY untouched.
+// autoApprovedTools is the tool allowlist every agentic session runs with.
+// It is the set `clauder wrap --slave` used to pass before agentic spawned
+// claude itself, kept identical so the launch path change is invisible.
+// Allowlisting mcp__clauder__* is inert when clauder is not installed.
+var autoApprovedTools = []string{
+	"Read", "Write", "Edit", "Glob", "Grep", "Bash(*)",
+	"WebFetch", "WebSearch", "mcp__clauder__*",
+}
+
+// buildChild spawns claude directly. Claude Code registers each session in
+// ~/.claude/sessions and opens a peer socket, so cross-instance messaging is
+// native and no longer needs `clauder wrap` in front of us; clauder's memory
+// tools arrive over its own MCP registration regardless of how we launch.
+//
+// Caller args go first because --allowedTools is variadic: it consumes args
+// until the next flag, so a trailing bare prompt lands after it as a tool
+// name and claude exits with "Input must be provided". Repeating the flag
+// per tool (rather than one comma-joined value) keeps a tool spec that
+// contains a comma from being split.
 func buildChild(opts Options) []string {
-	if !opts.NoClauder {
-		if _, err := exec.LookPath("clauder"); err == nil {
-			args := []string{"clauder", "wrap", "--slave"}
-			if opts.InstanceName != "" {
-				args = append(args, "--name", opts.InstanceName)
-			}
-			return append(append(args, "--"), opts.ClaudeArgs...)
-		}
+	args := append([]string{"claude"}, opts.ClaudeArgs...)
+	if opts.InstanceName != "" {
+		args = append(args, "--name", opts.InstanceName)
 	}
-	return append([]string{"claude"}, opts.ClaudeArgs...)
+	for _, tool := range autoApprovedTools {
+		args = append(args, "--allowedTools", tool)
+	}
+	return args
 }
 
 func recordSession(dataDir, id, profile string, start bool) {

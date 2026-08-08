@@ -151,7 +151,8 @@ var setupCmd = &cobra.Command{
 		}
 
 		if ensureClauder() {
-			fmt.Println("  sessions will launch via `clauder wrap` (cross-instance messaging + memory)")
+			fmt.Println("  clauder's persistent memory is available to sessions over its own MCP server")
+			fmt.Println("  (cross-instance messaging is native to Claude Code — nothing to configure)")
 		}
 
 		fmt.Println("\nDone. Start a session with: agentic")
