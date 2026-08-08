@@ -46,7 +46,6 @@ tracking. Everything after -- is passed to claude verbatim.`,
 			Profile:      flagProfile,
 			ModelFlag:    flagModel,
 			InstanceName: flagName,
-			NoClauder:    flagNoClauder,
 			Passthrough:  flagPassthrough,
 			ClaudeArgs:   claudeArgs,
 		}, logger())
@@ -56,8 +55,11 @@ tracking. Everything after -- is passed to claude verbatim.`,
 func init() {
 	rootCmd.Flags().StringVarP(&flagProfile, "profile", "p", "", "profile from ~/.agentic/config.yaml")
 	rootCmd.Flags().StringVar(&flagModel, "model", "", "one-shot main-model alias override")
-	rootCmd.Flags().StringVar(&flagName, "name", "", "instance name (forwarded to clauder)")
-	rootCmd.Flags().BoolVar(&flagNoClauder, "no-clauder", false, "launch bare claude even if clauder is installed")
+	rootCmd.Flags().StringVar(&flagName, "name", "", "session name (forwarded to claude)")
+	rootCmd.Flags().BoolVar(&flagNoClauder, "no-clauder", false, "")
+	// Every session is a bare claude now, so there is no wrap layer to opt out
+	// of. Kept as an accepted no-op so existing aliases and scripts still run.
+	rootCmd.Flags().MarkDeprecated("no-clauder", "sessions always launch claude directly; this flag does nothing")
 	rootCmd.Flags().BoolVar(&flagPassthrough, "passthrough", false, "skip the router (subscription billing, no tracking)")
 	rootCmd.AddCommand(routerCmd, costCmd, modelsCmd, setupCmd, contextCmd, evalCmd)
 }

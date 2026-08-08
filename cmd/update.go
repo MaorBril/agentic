@@ -66,7 +66,10 @@ This updates agentic only — Claude Code updates itself independently.`,
 		printRestartReport(rel.TagName)
 
 		// Running sessions host the router in-process; the new binary only
-		// takes over when they restart. Tell them via clauder.
+		// takes over when they restart. Claude Code's native peer messaging
+		// is session-to-session only, with no CLI to reach it from out here,
+		// so we still notify through clauder — which registers instances from
+		// its MCP server and so sees sessions we no longer wrap.
 		msg := fmt.Sprintf("[agentic] agentic was updated to %s. If this session was launched via `agentic`, "+
 			"its router is still running the old version — please tell the user this session should be "+
 			"restarted (exit and re-run `agentic`) at a convenient moment to pick up the update.", rel.TagName)

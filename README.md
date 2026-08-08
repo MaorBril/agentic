@@ -27,7 +27,7 @@ There are three ways people solve "I want Claude Code but not locked to one prov
 | **Runs as** | Static Go binary, no daemon (leader election over a fixed port) | Daemon / server process you deploy and administer | Standalone CLI you run instead of Claude Code |
 | **Cost & budgets** | First-class CLI: `agentic cost`, live statusline, hard-stop daily/weekly/monthly budgets | Usually a dashboard (LiteLLM) or not built in | Varies by tool, rarely budget-gated |
 | **Model routing** | Aliases + a built-in LLM-classifier tier router (`auto`), sticky per turn | Rule-based routing configs; no classifier-based tiering | Manual model switch, no auto-routing |
-| **Memory / cross-instance** | Composes with [clauder](https://github.com/MaorBril/clauder) — separate binary, optional | Not their concern | Varies |
+| **Memory** | Composes with [clauder](https://github.com/MaorBril/clauder) — separate binary, optional | Not their concern | Varies |
 
 The short version: agentic doesn't try to be a better harness than Claude Code — it keeps Claude Code exactly as Anthropic ships it and only swaps what's behind `ANTHROPIC_BASE_URL`. If you want a different agent loop altogether, OpenCode/Crush/Goose/Aider are the right layer to look at instead. If you want a gateway you deploy and administer for a team, LiteLLM is a more mature choice for that. agentic is for a single developer who wants `claude`, unmodified, with a budget and a cheap-model escape hatch, installed in one command and running with nothing to operate.
 
@@ -236,7 +236,11 @@ When your aliases change, the next `agentic` launch offers to refresh them (once
 
 ## Works with clauder
 
-If [clauder](https://github.com/MaorBril/clauder) is installed, agentic launches sessions through `clauder wrap --slave`, so your instances get persistent memory, can message each other, and run with clauder's auto-approved tool set for autonomous operation. Launch with `--no-clauder` for a bare claude session. The two tools are independent; each works without the other.
+agentic spawns `claude` directly and grants each session an auto-approved tool set for autonomous operation (`Read Write Edit Glob Grep Bash(*) WebFetch WebSearch mcp__clauder__*`). `--name` becomes claude's own session name.
+
+Cross-instance messaging is native to Claude Code — sessions register under `~/.claude/sessions` and reach each other over a peer socket — so agentic no longer launches through `clauder wrap`. [clauder](https://github.com/MaorBril/clauder) remains a useful companion for **persistent memory**, which it provides over its own MCP server registration and therefore works no matter how the session was started. The two tools are independent; each works without the other.
+
+`--no-clauder` is accepted but deprecated: every session is a bare claude now, so there is no wrap layer to opt out of.
 
 ## Commands
 
