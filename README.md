@@ -234,11 +234,30 @@ Every model you've configured becomes selectable by name — `subagent_type: "ag
 
 When your aliases change, the next `agentic` launch offers to refresh them (once — decline and it stays quiet until the aliases change again; `AGENTIC_NO_AGENT_SYNC=1` opts out entirely). Only files prefixed `agentic-` are ever written or removed, so your own subagents are never touched.
 
+## Finding another session
+
+Claude Code sessions can message each other, but addressing one is awkward: session names are auto-derived from whatever that session is doing (`daily-case-runtime`), so the name you'd actually say is the project directory — and `ListAgents`, the only thing that can mint the `[ref]` a cross-session `SendMessage` needs, doesn't show directories.
+
+`agentic peers` closes that gap by matching on both:
+
+```
+$ agentic peers labs-service-secondlife-be
+Best match for "labs-service-secondlife-be":
+  daily-case-runtime             busy  ~/code/secondlife/labs-service         started 12h ago
+
+To message it: call ListAgents for its [ref], then SendMessage to
+"daily-case-runtime [ref]" — the bare name works after first contact.
+```
+
+With no argument it lists every session you can reach. Sessions on a build older than Claude Code 2.1.224 register no socket and are unreachable until restarted — they're reported as a count rather than silently omitted. When a query matches several sessions equally well, it says so instead of picking one.
+
+`agentic setup` writes this workflow into `~/.claude/CLAUDE.md`, between `<!-- agentic:peers:start -->` markers, so every session — agentic-launched or plain `claude` — knows to resolve names this way. Re-running setup refreshes that block and leaves the rest of the file alone.
+
 ## Works with clauder
 
 agentic spawns `claude` directly and grants each session an auto-approved tool set for autonomous operation (`Read Write Edit Glob Grep Bash(*) WebFetch WebSearch mcp__clauder__*`). `--name` becomes claude's own session name.
 
-Cross-instance messaging is native to Claude Code — sessions register under `~/.claude/sessions` and reach each other over a peer socket — so agentic no longer launches through `clauder wrap`. [clauder](https://github.com/MaorBril/clauder) remains a useful companion for **persistent memory**, which it provides over its own MCP server registration and therefore works no matter how the session was started. The two tools are independent; each works without the other.
+Cross-instance messaging is native to Claude Code — sessions register under `~/.claude/sessions` and reach each other over a peer socket — so agentic no longer launches through `clauder wrap`. See [Finding another session](#finding-another-session) for addressing them. [clauder](https://github.com/MaorBril/clauder) remains a useful companion for **persistent memory**, which it provides over its own MCP server registration and therefore works no matter how the session was started. The two tools are independent; each works without the other.
 
 `--no-clauder` is accepted but deprecated: every session is a bare claude now, so there is no wrap layer to opt out of.
 
@@ -247,7 +266,8 @@ Cross-instance messaging is native to Claude Code — sessions register under `~
 | Command | What it does |
 |---|---|
 | `agentic [-p profile] [--model alias] [-- args]` | launch Claude Code (args after `--` go to claude) |
-| `agentic setup` | first-run config, token, statusline registration |
+| `agentic setup` | first-run config, token, statusline + peer-guidance registration |
+| `agentic peers [name]` | find another Claude Code session to message |
 | `agentic cost [--week\|--month] [--by model\|profile\|session]` | spend report |
 | `agentic context [session-id]` | context-fullness trajectory (true vs reported tokens) |
 | `agentic eval run/report` | paired model evaluation and artifact report |
