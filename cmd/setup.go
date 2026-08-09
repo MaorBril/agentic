@@ -10,6 +10,7 @@ import (
 
 	"github.com/maorbril/agentic/internal/config"
 	"github.com/maorbril/agentic/internal/launch"
+	"github.com/maorbril/agentic/internal/peers"
 )
 
 // registerStatusline merges a statusLine entry into ~/.claude/settings.json
@@ -48,6 +49,31 @@ func registerStatusline() error {
 		return err
 	}
 	fmt.Println("✓ registered agentic statusline in ~/.claude/settings.json")
+	return nil
+}
+
+// registerPeerGuidance teaches every session — agentic-launched or not — how
+// to resolve an approximate session name via `agentic peers`. It lives in
+// ~/.claude/CLAUDE.md between markers, so re-running setup refreshes the block
+// without touching anything else in the file.
+func registerPeerGuidance() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(home, ".claude", "CLAUDE.md")
+	action, err := peers.InstallGuidance(path)
+	if err != nil {
+		return err
+	}
+	switch action {
+	case peers.Created:
+		fmt.Println("✓ wrote peer-resolution guidance to ~/.claude/CLAUDE.md")
+	case peers.Updated:
+		fmt.Println("✓ refreshed peer-resolution guidance in ~/.claude/CLAUDE.md")
+	default:
+		fmt.Println("✓ peer-resolution guidance already current in ~/.claude/CLAUDE.md")
+	}
 	return nil
 }
 
@@ -148,6 +174,10 @@ var setupCmd = &cobra.Command{
 
 		if err := registerStatusline(); err != nil {
 			fmt.Printf("⚠ could not register statusline: %v\n", err)
+		}
+
+		if err := registerPeerGuidance(); err != nil {
+			fmt.Printf("⚠ could not write peer guidance: %v\n", err)
 		}
 
 		if ensureClauder() {
