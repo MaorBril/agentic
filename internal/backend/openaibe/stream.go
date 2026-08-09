@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"time"
 
@@ -39,17 +40,29 @@ type streamState struct {
 	scale          float64         // context-scaling factor for client-facing usage
 	estInput       int64           // scaled input estimate for message_start (see startMessage)
 	keepAliveEvery time.Duration   // ping cadence while the upstream is quiet
+	idleTimeout    time.Duration   // give up if the upstream sends nothing at all for this long
 }
+
+// maxIdleStream is how long Run waits for upstream activity — a scanner
+// line, in either direction — before giving up. Distinct from
+// keepAliveEvery (which pings the *client*): a vLLM box can stall
+// byte-silently without closing the connection, and NewTransport's
+// ResponseHeaderTimeout only guards the initial headers, not an
+// already-established stream. Generous because slow reasoning models can
+// legitimately sit quiet for a minute before the first token.
+const maxIdleStream = 5 * time.Minute
 
 func newStreamState(sse *anthropic.SSEWriter, alias string) *streamState {
-	return &streamState{sse: sse, alias: alias, openaiToolIx: -1, scale: 1, keepAliveEvery: 15 * time.Second}
+	return &streamState{sse: sse, alias: alias, openaiToolIx: -1, scale: 1,
+		keepAliveEvery: 15 * time.Second, idleTimeout: maxIdleStream}
 }
 
-// Run consumes the upstream SSE body until EOF, [DONE], or ctx cancellation,
-// returning final usage. A mid-stream upstream error is forwarded as an
-// Anthropic error event (Claude Code retries on it). While the upstream is
-// quiet — slow reasoning models can sit for a minute before the first token —
-// pings keep the client from timing out on a byte-silent connection.
+// Run consumes the upstream SSE body until EOF, [DONE], ctx cancellation, or
+// idleTimeout of silence — returning final usage. A mid-stream upstream
+// error is forwarded as an Anthropic error event (Claude Code retries on
+// it). While the upstream is quiet — slow reasoning models can sit for a
+// minute before the first token — pings keep the client from timing out on
+// a byte-silent connection.
 func (s *streamState) Run(ctx context.Context, body io.Reader) (anthropic.Usage, string) {
 	lines := make(chan []byte)
 	scanErr := make(chan error, 1)
@@ -73,6 +86,8 @@ func (s *streamState) Run(ctx context.Context, body io.Reader) (anthropic.Usage,
 
 	keepAlive := time.NewTicker(s.keepAliveEvery)
 	defer keepAlive.Stop()
+	idle := time.NewTimer(s.idleTimeout)
+	defer idle.Stop()
 
 	for {
 		select {
@@ -80,6 +95,14 @@ func (s *streamState) Run(ctx context.Context, body io.Reader) (anthropic.Usage,
 			// Client hung up or the turn was cancelled; the transport closes
 			// the upstream body for us, so just stop translating.
 			return s.usage, "client_disconnect"
+		case <-idle.C:
+			// Upstream has produced nothing — not even scanner noise — for
+			// idleTimeout. Without this the select loop above waits on
+			// ctx.Done() forever: a stalled vLLM box that never closes the
+			// connection hangs the request indefinitely (the reported "stuck,
+			// needs a manual interrupt" symptom).
+			s.sse.ErrorEvent("api_error", fmt.Sprintf("upstream stream: no data for %s, giving up", s.idleTimeout))
+			return s.usage, "api_error"
 		case <-keepAlive.C:
 			s.ping()
 		case err := <-scanErr:
@@ -89,6 +112,10 @@ func (s *streamState) Run(ctx context.Context, body io.Reader) (anthropic.Usage,
 			}
 			return s.usage, s.finalize()
 		case line := <-lines:
+			if !idle.Stop() {
+				<-idle.C
+			}
+			idle.Reset(s.idleTimeout)
 			data, ok := bytes.CutPrefix(line, []byte("data: "))
 			if !ok {
 				continue

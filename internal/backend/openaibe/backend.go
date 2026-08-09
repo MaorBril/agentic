@@ -56,9 +56,9 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 		if ctx.Err() != nil {
 			return backend.Result{Status: 499, ErrType: "client_disconnect"}
 		}
-		anthropic.WriteError(w, 500, "api_error",
-			fmt.Sprintf("%s upstream: %v", call.Route.ProviderName, err))
-		return backend.Result{Status: 502, ErrType: "api_error"}
+		msg := fmt.Sprintf("%s upstream: %v", call.Route.ProviderName, err)
+		anthropic.WriteError(w, 500, "api_error", msg)
+		return backend.Result{Status: 502, ErrType: "api_error", ErrMsg: msg}
 	}
 	defer resp.Body.Close()
 
@@ -84,18 +84,21 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		anthropic.WriteError(w, 500, "api_error", "agentic: reading upstream body: "+err.Error())
-		return backend.Result{Status: 502, ErrType: "api_error"}
+		msg := "agentic: reading upstream body: " + err.Error()
+		anthropic.WriteError(w, 500, "api_error", msg)
+		return backend.Result{Status: 502, ErrType: "api_error", ErrMsg: msg}
 	}
 	var parsed openai.ChatResponse
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		anthropic.WriteError(w, 500, "api_error", "agentic: upstream body unparseable: "+err.Error())
-		return backend.Result{Status: 502, ErrType: "api_error"}
+		msg := "agentic: upstream body unparseable: " + err.Error()
+		anthropic.WriteError(w, 500, "api_error", msg)
+		return backend.Result{Status: 502, ErrType: "api_error", ErrMsg: msg}
 	}
 	out, err := TranslateResponse(&parsed, call.Envelope.Model)
 	if err != nil {
-		anthropic.WriteError(w, 500, "api_error", "agentic translate: "+err.Error())
-		return backend.Result{Status: 502, ErrType: "api_error"}
+		msg := "agentic translate: " + err.Error()
+		anthropic.WriteError(w, 500, "api_error", msg)
+		return backend.Result{Status: 502, ErrType: "api_error", ErrMsg: msg}
 	}
 	trueUsage := out.Usage
 	out.Usage = tokens.ScaleUsage(trueUsage, scale)
