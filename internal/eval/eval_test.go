@@ -432,9 +432,19 @@ func TestTelemetryPopulatesUsageAndRoutes(t *testing.T) {
 }
 
 func TestEvalEnvRoutesAndAttributes(t *testing.T) {
-	env := evalEnv([]string{"ANTHROPIC_API_KEY=bad"}, Options{BaseURL: "http://router", Token: "token", Profile: "main"}, "eval-1")
+	env := evalEnv([]string{"ANTHROPIC_API_KEY=bad"}, Options{BaseURL: "http://router", Token: "token", Profile: "main"}, "eval-1", "gpt-5.6-sol")
 	joined := strings.Join(env, "\n")
-	for _, want := range []string{"ANTHROPIC_BASE_URL=http://router", "ANTHROPIC_AUTH_TOKEN=token", "X-Agentic-Session: eval-1", "AGENTIC_SESSION_ID=eval-1"} {
+	for _, want := range []string{
+		"ANTHROPIC_BASE_URL=http://router", "ANTHROPIC_AUTH_TOKEN=token",
+		"X-Agentic-Session: eval-1", "AGENTIC_SESSION_ID=eval-1",
+		"X-Agentic-Pin-Model: gpt-5.6-sol",
+		"ANTHROPIC_MODEL=gpt-5.6-sol",
+		"ANTHROPIC_SMALL_FAST_MODEL=gpt-5.6-sol",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-5.6-sol",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6-sol",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-5.6-sol",
+		"CLAUDE_CODE_SUBAGENT_MODEL=gpt-5.6-sol",
+	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("env missing %q: %s", want, joined)
 		}

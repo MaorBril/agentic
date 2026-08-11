@@ -132,9 +132,18 @@ func TestRunDockerCandidateClassifiesInfrastructureAndModelFailures(t *testing.T
 }
 
 func TestDockerContainerEnvAndArgRedaction(t *testing.T) {
-	env := containerEnvArgs(DockerContainerEnv{BaseURL: "url", Token: "token", SessionID: "sid", Profile: "profile"})
+	env := containerEnvArgs(DockerContainerEnv{BaseURL: "url", Token: "token", SessionID: "sid", Profile: "profile", Model: "gpt-5.6-sol"})
 	joined := strings.Join(env, "\n")
-	for _, want := range []string{"ANTHROPIC_BASE_URL=url", "ANTHROPIC_AUTH_TOKEN=token", "X-Agentic-Session: sid", "X-Agentic-Profile: profile"} {
+	for _, want := range []string{
+		"ANTHROPIC_BASE_URL=url", "ANTHROPIC_AUTH_TOKEN=token", "X-Agentic-Session: sid", "X-Agentic-Profile: profile",
+		"X-Agentic-Pin-Model: gpt-5.6-sol",
+		"ANTHROPIC_MODEL=gpt-5.6-sol",
+		"ANTHROPIC_SMALL_FAST_MODEL=gpt-5.6-sol",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-5.6-sol",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.6-sol",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-5.6-sol",
+		"CLAUDE_CODE_SUBAGENT_MODEL=gpt-5.6-sol",
+	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("env missing %q: %s", want, joined)
 		}

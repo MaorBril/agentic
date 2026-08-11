@@ -606,8 +606,8 @@ func (r *Runner) runCandidate(ctx context.Context, manifest *Manifest, task Task
 		return res, nil
 	}
 
-	argv := []string{r.Options.ClaudeBin, "--print", "--output-format", "json", "--permission-mode", "bypassPermissions", "--model", model, task.Prompt}
-	env := evalEnv(os.Environ(), r.Options, res.SessionID)
+	argv := []string{r.Options.ClaudeBin, "--print", "--output-format", "json", "--permission-mode", "bypassPermissions", "--disallowedTools", "Task", "--model", model, task.Prompt}
+	env := evalEnv(os.Environ(), r.Options, res.SessionID, model)
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
 	runCtx, cancel := context.WithTimeout(ctx, r.Options.Timeout)
@@ -703,7 +703,7 @@ func (r *Runner) runJudge(ctx context.Context, task Task, attempt int, candidate
 		mapping["candidate_1"], mapping["candidate_2"] = "mut", "baseline"
 	}
 	prompt := judgePrompt(task, first, second)
-	argv := []string{r.Options.ClaudeBin, "--print", "--output-format", "json", "--permission-mode", "bypassPermissions", "--model", r.Options.Judge, prompt}
+	argv := []string{r.Options.ClaudeBin, "--print", "--output-format", "json", "--permission-mode", "bypassPermissions", "--disallowedTools", "Task", "--model", r.Options.Judge, prompt}
 	sid := sessionID(r.Options.Seed, task.ID, attempt, "judge")
 	var stdout, stderr bytes.Buffer
 	judgeDir := filepath.Join(pairDir, "judge")
@@ -715,7 +715,7 @@ func (r *Runner) runJudge(ctx context.Context, task Task, attempt int, candidate
 		return JudgeResult{}, "", err
 	}
 	judgeCtx, cancel := context.WithTimeout(ctx, r.Options.Timeout)
-	err := r.Exec.Run(judgeCtx, workDir, evalEnv(os.Environ(), r.Options, sid), argv, nil, &stdout, &stderr)
+	err := r.Exec.Run(judgeCtx, workDir, evalEnv(os.Environ(), r.Options, sid, r.Options.Judge), argv, nil, &stdout, &stderr)
 	cancel()
 	os.WriteFile(filepath.Join(judgeDir, "stdout.json"), stdout.Bytes(), 0o644)
 	os.WriteFile(filepath.Join(judgeDir, "stderr.log"), stderr.Bytes(), 0o644)
@@ -882,13 +882,22 @@ func verify(ctx context.Context, ex Executor, dir string, c Command, logPath str
 	return v
 }
 
-func evalEnv(env []string, o Options, sid string) []string {
+func evalEnv(env []string, o Options, sid, model string) []string {
 	env = setEnv(env, "ANTHROPIC_BASE_URL", o.BaseURL)
 	env = setEnv(env, "ANTHROPIC_AUTH_TOKEN", o.Token)
 	env = unsetEnv(env, "ANTHROPIC_API_KEY")
-	env = setEnv(env, "ANTHROPIC_CUSTOM_HEADERS", fmt.Sprintf("X-Agentic-Session: %s\nX-Agentic-Profile: %s", sid, o.Profile))
+	env = setEnv(env, "ANTHROPIC_CUSTOM_HEADERS", fmt.Sprintf("X-Agentic-Session: %s\nX-Agentic-Profile: %s\nX-Agentic-Pin-Model: %s", sid, o.Profile, model))
 	env = setEnv(env, "AGENTIC_SESSION_ID", sid)
 	env = setEnv(env, "AGENTIC_PROFILE", o.Profile)
+	// Pin all tier fallbacks to the candidate model so subagent spawns don't
+	// escape to Claude Code's own defaults (opus/sonnet). Mirrors
+	// launch.go:100-107, which does the same for interactive sessions.
+	env = setEnv(env, "ANTHROPIC_MODEL", model)
+	env = setEnv(env, "ANTHROPIC_SMALL_FAST_MODEL", model)
+	env = setEnv(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", model)
+	env = setEnv(env, "ANTHROPIC_DEFAULT_SONNET_MODEL", model)
+	env = setEnv(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL", model)
+	env = setEnv(env, "CLAUDE_CODE_SUBAGENT_MODEL", model)
 	return env
 }
 

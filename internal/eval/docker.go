@@ -99,6 +99,7 @@ type DockerContainerEnv struct {
 	Token     string
 	SessionID string
 	Profile   string
+	Model     string
 }
 
 func containerEnvArgs(e DockerContainerEnv) []string {
@@ -107,9 +108,17 @@ func containerEnvArgs(e DockerContainerEnv) []string {
 		"USER=nonroot",
 		"ANTHROPIC_BASE_URL=" + e.BaseURL,
 		"ANTHROPIC_AUTH_TOKEN=" + e.Token,
-		"ANTHROPIC_CUSTOM_HEADERS=X-Agentic-Session: " + e.SessionID + "\nX-Agentic-Profile: " + e.Profile,
+		"ANTHROPIC_CUSTOM_HEADERS=X-Agentic-Session: " + e.SessionID + "\nX-Agentic-Profile: " + e.Profile + "\nX-Agentic-Pin-Model: " + e.Model,
 		"AGENTIC_SESSION_ID=" + e.SessionID,
 		"AGENTIC_PROFILE=" + e.Profile,
+		// Pin all tier fallbacks to the candidate model so subagent spawns don't escape
+		// to Claude defaults (opus/sonnet).
+		"ANTHROPIC_MODEL=" + e.Model,
+		"ANTHROPIC_SMALL_FAST_MODEL=" + e.Model,
+		"ANTHROPIC_DEFAULT_OPUS_MODEL=" + e.Model,
+		"ANTHROPIC_DEFAULT_SONNET_MODEL=" + e.Model,
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL=" + e.Model,
+		"CLAUDE_CODE_SUBAGENT_MODEL=" + e.Model,
 	}
 }
 
@@ -190,7 +199,7 @@ func RunDockerCandidate(ctx context.Context, opts DockerOptions, instance SWEBen
 	}
 	logf("claude code installed at %s", claudePath)
 
-	argv := []string{claudePath, "--print", "--output-format", "json", "--permission-mode", "bypassPermissions", "--model", model, prompt}
+	argv := []string{claudePath, "--print", "--output-format", "json", "--permission-mode", "bypassPermissions", "--disallowedTools", "Task", "--model", model, prompt}
 	env := containerEnvArgs(containerEnv)
 	turnCtx, turnCancel := context.WithTimeout(ctx, claudeTimeout)
 	stdout, stderr, err := dockerExecUser(turnCtx, opts, env, argv, &log, false, containerID, "nonroot")
@@ -474,7 +483,7 @@ func (r *Runner) runSWEBenchCandidate(ctx context.Context, manifest *Manifest, t
 	}
 
 	run := RunDockerCandidate(ctx, r.Options.Docker, instance, task.Prompt, model, r.Options.Timeout, DockerContainerEnv{
-		BaseURL: r.relay.ContainerURL, Token: r.Options.Token, SessionID: res.SessionID, Profile: r.Options.Profile,
+		BaseURL: r.relay.ContainerURL, Token: r.Options.Token, SessionID: res.SessionID, Profile: r.Options.Profile, Model: model,
 	})
 	res.Status, res.Error, res.ExitCode, res.DurationMS = run.Status, run.Error, run.ExitCode, run.DurationMS
 	res.FinalText = finalText(run.Stdout)
