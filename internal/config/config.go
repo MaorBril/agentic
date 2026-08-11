@@ -115,12 +115,21 @@ func (m Model) ContextBudget() int {
 }
 
 type Profile struct {
-	Model       string            `yaml:"model"`
-	SmallFast   string            `yaml:"small_fast"`
-	Tiers       map[string]string `yaml:"tiers"` // opus/sonnet/haiku -> alias
-	Budget      *Budget           `yaml:"budget"`
-	Passthrough bool              `yaml:"passthrough"`
-	TimeoutMS   int               `yaml:"timeout_ms"`
+	Model     string            `yaml:"model"`
+	SmallFast string            `yaml:"small_fast"`
+	Tiers     map[string]string `yaml:"tiers"` // opus/sonnet/haiku -> alias
+	// PinTiers forces every tier fallback (small_fast, opus/sonnet/haiku,
+	// and Claude Code's own subagent spawns) onto Model instead of the
+	// aliases above. Off by default so a profile like `tiers: {opus: opus,
+	// sonnet: sonnet, haiku: haiku}` keeps working as a deliberate per-tier
+	// routing choice; turn this on when you want one model end-to-end
+	// (e.g. testing a non-Anthropic model's true harness overhead, or
+	// keeping a whole session pinned to a specific cost/speed tradeoff).
+	// Mirrors internal/eval's evalEnv() candidate pinning.
+	PinTiers    bool    `yaml:"pin_tiers"`
+	Budget      *Budget `yaml:"budget"`
+	Passthrough bool    `yaml:"passthrough"`
+	TimeoutMS   int     `yaml:"timeout_ms"`
 }
 
 type Budget struct {
@@ -246,6 +255,9 @@ func (c *Config) Validate() error {
 			if !c.isModelRef(alias) {
 				return fmt.Errorf("config: profile %q tier %q references unknown model alias %q", name, tier, alias)
 			}
+		}
+		if prof.PinTiers && prof.Model == "" {
+			return fmt.Errorf("config: profile %q sets pin_tiers but has no model to pin to", name)
 		}
 	}
 	if c.DefaultProfile != "" {

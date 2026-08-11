@@ -187,6 +187,82 @@ func TestAutoRouteEndToEnd(t *testing.T) {
 	}
 }
 
+// TestPinModelOverridesRequestAndBypassesAutoRoute exercises the router-side
+// enforcement of X-Agentic-Pin-Model: a pinned session's request must resolve
+// to the pinned alias even when the request body names a different model,
+// and dynamic `auto` routing (classifier + goal detection) must never fire —
+// the whole point of pinning is that no other logic gets a vote.
+func TestPinModelOverridesRequestAndBypassesAutoRoute(t *testing.T) {
+	var seenModels []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model string `json:"model"`
+		}
+		json.Unmarshal(body, &req)
+		seenModels = append(seenModels, req.Model)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`)
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Providers: map[string]config.Provider{
+			"fake": {Type: config.ProviderOpenAI, BaseURL: upstream.URL},
+		},
+		Models: map[string]config.Model{
+			"cheap": {Provider: "fake", ID: "classifier-upstream"},
+			"big":   {Provider: "fake", ID: "big-upstream"},
+			"small": {Provider: "fake", ID: "small-upstream"},
+		},
+		Routing: map[string]config.RouteRule{
+			"auto": {Classifier: "cheap", Default: "light",
+				Tiers: map[string]string{"deep": "big", "light": "small"}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "agentic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := NewServer(cfg, testToken, dir, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Request body asks for the dynamic "auto" alias (which would normally
+	// trigger the classifier), but the session is pinned to "small" — the
+	// pin must win outright, with zero classifier calls.
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/messages",
+		strings.NewReader(`{"model":"auto","max_tokens":50,"messages":[{"role":"user","content":"architect the whole system"}]}`))
+	req.Header.Set("x-api-key", testToken)
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("X-Agentic-Session", "sess-pinned")
+	req.Header.Set("X-Agentic-Profile", "main")
+	req.Header.Set("X-Agentic-Pin-Model", "small")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, respBody)
+	}
+	if len(seenModels) != 1 || seenModels[0] != "small-upstream" {
+		t.Errorf("upstream saw %v, want exactly [small-upstream] (pin must bypass classifier entirely)", seenModels)
+	}
+
+	// No route decision recorded — pinning skips the auto-router altogether.
+	if _, _, _, _, ok, _ := st.LatestRouteDecision("sess-pinned"); ok {
+		t.Error("route decision recorded for a pinned session; pin should bypass auto-routing")
+	}
+}
+
 // TestAutoGoalEndToEnd exercises goal detection through the full server:
 // a goal-worthy classifier verdict must show up in the forwarded request's
 // system prompt (as the harness's own loop sentinel) and be persisted.

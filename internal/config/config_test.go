@@ -90,6 +90,14 @@ providers:
 models:
   m: {provider: anthropic, id: claude-sonnet-5, effective_context: 60000}
 `,
+		"pin_tiers without a model to pin to": `
+providers:
+  anthropic: {type: anthropic, base_url: https://api.anthropic.com}
+models:
+  m: {provider: anthropic, id: claude-sonnet-5}
+profiles:
+  p: {pin_tiers: true}
+`,
 	}
 	for name, yaml := range cases {
 		if _, err := Parse([]byte(yaml)); err == nil {

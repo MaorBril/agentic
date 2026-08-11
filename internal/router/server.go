@@ -118,8 +118,21 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 		}
 		cfg := s.cfg.Load()
 		sessionID := r.Header.Get("X-Agentic-Session")
+		pinModel := r.Header.Get("X-Agentic-Pin-Model")
 		resolveAlias := env.Model
-		if rule, ok := cfg.Routing[env.Model]; ok {
+		if pinModel != "" {
+			// A pinned session (eval candidates, pin_tiers profiles) must
+			// never escape to a different model — not even via dynamic
+			// `auto` routing. This is the router-side backstop for the
+			// env-var pinning done at launch: if Claude Code's own
+			// subagent-spawn logic (or a bug, or a future SDK default)
+			// requests a different model, remap it back here rather than
+			// silently letting the request reach a different provider.
+			if resolveAlias != pinModel {
+				s.log.Info("pin_remap", "session", sessionID, "requested", resolveAlias, "pinned", pinModel)
+				resolveAlias = pinModel
+			}
+		} else if rule, ok := cfg.Routing[env.Model]; ok {
 			chosen, tier, reason := s.auto.route(r.Context(), rule, cfg, raw, sessionID)
 			s.log.Info("autoroute", "alias", env.Model, "tier", tier, "model", chosen, "reason", reason)
 			resolveAlias = chosen

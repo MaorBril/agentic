@@ -93,25 +93,7 @@ func Run(ctx context.Context, cfg *config.Config, dataDir string, opts Options, 
 		if opts.ModelFlag != "" {
 			model = opts.ModelFlag
 		}
-		env = setEnv(env, "ANTHROPIC_BASE_URL", mgr.BaseURL())
-		env = setEnv(env, "ANTHROPIC_AUTH_TOKEN", token)
-		env = unsetEnv(env, "ANTHROPIC_API_KEY")
-		if model != "" {
-			env = setEnv(env, "ANTHROPIC_MODEL", model)
-		}
-		if prof.SmallFast != "" {
-			env = setEnv(env, "ANTHROPIC_SMALL_FAST_MODEL", prof.SmallFast)
-		}
-		for tier, alias := range prof.Tiers {
-			env = setEnv(env, "ANTHROPIC_DEFAULT_"+strings.ToUpper(tier)+"_MODEL", alias)
-		}
-		env = setEnv(env, "ANTHROPIC_CUSTOM_HEADERS",
-			fmt.Sprintf("X-Agentic-Session: %s\nX-Agentic-Profile: %s", sessionID, profName))
-		env = setEnv(env, "AGENTIC_SESSION_ID", sessionID)
-		env = setEnv(env, "AGENTIC_PROFILE", profName)
-		if prof.TimeoutMS > 0 {
-			env = setEnv(env, "API_TIMEOUT_MS", fmt.Sprint(prof.TimeoutMS))
-		}
+		env = sessionEnv(env, mgr.BaseURL(), token, sessionID, profName, prof, model)
 
 		recordSession(dataDir, sessionID, profName, true)
 		defer func() {
@@ -148,6 +130,50 @@ func Run(ctx context.Context, cfg *config.Config, dataDir string, opts Options, 
 		return nil
 	}
 	return err
+}
+
+// sessionEnv assembles the child process environment for a non-passthrough
+// profile: router creds, model selection, and the X-Agentic-* headers Claude
+// Code carries transparently on every request so the router can attribute
+// spend to this session and (when pinned) enforce the pin. Extracted from
+// Run so PinTiers behavior is directly testable without spawning a router
+// or a claude process.
+func sessionEnv(env []string, baseURL, token, sessionID, profName string, prof config.Profile, model string) []string {
+	env = setEnv(env, "ANTHROPIC_BASE_URL", baseURL)
+	env = setEnv(env, "ANTHROPIC_AUTH_TOKEN", token)
+	env = unsetEnv(env, "ANTHROPIC_API_KEY")
+	if model != "" {
+		env = setEnv(env, "ANTHROPIC_MODEL", model)
+	}
+	if prof.PinTiers && model != "" {
+		// Pin every tier fallback — including Claude Code's own subagent
+		// spawns — to the main model, overriding small_fast/tiers config
+		// entirely. Mirrors internal/eval's evalEnv() candidate pinning,
+		// for interactive sessions that want one model end-to-end rather
+		// than per-tier routing.
+		env = setEnv(env, "ANTHROPIC_SMALL_FAST_MODEL", model)
+		env = setEnv(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", model)
+		env = setEnv(env, "ANTHROPIC_DEFAULT_SONNET_MODEL", model)
+		env = setEnv(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL", model)
+		env = setEnv(env, "CLAUDE_CODE_SUBAGENT_MODEL", model)
+		env = setEnv(env, "ANTHROPIC_CUSTOM_HEADERS",
+			fmt.Sprintf("X-Agentic-Session: %s\nX-Agentic-Profile: %s\nX-Agentic-Pin-Model: %s", sessionID, profName, model))
+	} else {
+		if prof.SmallFast != "" {
+			env = setEnv(env, "ANTHROPIC_SMALL_FAST_MODEL", prof.SmallFast)
+		}
+		for tier, alias := range prof.Tiers {
+			env = setEnv(env, "ANTHROPIC_DEFAULT_"+strings.ToUpper(tier)+"_MODEL", alias)
+		}
+		env = setEnv(env, "ANTHROPIC_CUSTOM_HEADERS",
+			fmt.Sprintf("X-Agentic-Session: %s\nX-Agentic-Profile: %s", sessionID, profName))
+	}
+	env = setEnv(env, "AGENTIC_SESSION_ID", sessionID)
+	env = setEnv(env, "AGENTIC_PROFILE", profName)
+	if prof.TimeoutMS > 0 {
+		env = setEnv(env, "API_TIMEOUT_MS", fmt.Sprint(prof.TimeoutMS))
+	}
+	return env
 }
 
 // autoApprovedTools is the tool allowlist every agentic session runs with.
