@@ -160,6 +160,21 @@ func TestAutoRouteTaskSizeFallback(t *testing.T) {
 	}
 }
 
+func TestAutoRouteContinuationPreservesOpeningHash(t *testing.T) {
+	calls := 0
+	a := newAuto("deep", nil, &calls)
+	opening := body(`{"role":"user","content":"plan the migration"}`)
+	a.route(context.Background(), testRule(), nil, opening, "retry")
+	continuation := body(`{"role":"user","content":"plan the migration"},
+	  {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read","input":{}}]},
+	  {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"data"}]}`)
+	a.route(context.Background(), testRule(), nil, continuation, "retry")
+	a.route(context.Background(), testRule(), nil, opening, "retry")
+	if calls != 1 {
+		t.Errorf("opening-turn retry reclassified after continuation: calls=%d", calls)
+	}
+}
+
 func TestAutoRouterResetCache(t *testing.T) {
 	calls := 0
 	a := newAuto("deep", nil, &calls)

@@ -108,9 +108,9 @@ func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.M
 	}
 
 	est := tokens.Estimate(req)
-	// Shared output cap: the largest MaxOutput among tiers and task targets,
-	// conservative (bias toward over-reserving, which biases toward
-	// remapping up — safe).
+	// Shared output cap: the largest MaxOutput among capability tiers. Task
+	// targets are checked after classification and must not make unrelated tier
+	// targets ineligible merely because a specialist model supports more output.
 	maxCap := 0
 	updateCap := func(alias string) {
 		if m, ok := cfg.Models[alias]; ok && m.MaxOutput > maxCap {
@@ -118,9 +118,6 @@ func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.M
 		}
 	}
 	for _, alias := range rule.Tiers {
-		updateCap(alias)
-	}
-	for _, alias := range rule.Tasks {
 		updateCap(alias)
 	}
 	reqMax := 0

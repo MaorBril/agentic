@@ -107,11 +107,15 @@ func mergeTaskFlags(existing map[string]string, flags []string) (map[string]stri
 		label, model, ok := strings.Cut(f, "=")
 		label = strings.TrimSpace(label)
 		model = strings.TrimSpace(model)
-		if !ok || label == "" || model == "" {
+		if !ok || label == "" {
 			return nil, fmt.Errorf("--task must be label=model, got %q", f)
 		}
 		if !config.IsTaskLabel(label) {
 			return nil, fmt.Errorf("--task: unknown label %q (want one of: %s)", label, strings.Join(config.TaskLabels, ", "))
+		}
+		if model == "" {
+			delete(merged, label)
+			continue
 		}
 		merged[label] = model
 	}
@@ -185,7 +189,7 @@ func init() {
 	routingSetCmd.Flags().StringVar(&routeStandard, "standard", "", "model alias for ordinary coding/tool work")
 	routingSetCmd.Flags().StringVar(&routeLight, "light", "", "model alias for mechanical edits/verification")
 	routingSetCmd.Flags().StringArrayVar(&routeTasks, "task", nil,
-		"task→model override, repeatable: label=model (e.g. --task security_review=fable); "+
+		"task→model override, repeatable: label=model; use label= to remove (e.g. --task security_review=fable); "+
 			"labels: "+strings.Join(config.TaskLabels, ", "))
 	routingCmd.AddCommand(routingSetCmd, routingListCmd, routingRemoveCmd)
 	rootCmd.AddCommand(routingCmd)

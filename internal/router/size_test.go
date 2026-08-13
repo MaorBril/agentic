@@ -88,6 +88,22 @@ func TestClassifyTierFitFilters(t *testing.T) {
 	}
 }
 
+func TestTaskMaxOutputDoesNotInflateTierRequirement(t *testing.T) {
+	cfg := sizedCfg()
+	largeTask := cfg.Models["tiny"]
+	largeTask.MaxOutput = 100000
+	largeTask.ContextWindow = 200000
+	cfg.Models["large-task"] = largeTask
+	rule := config.RouteRule{
+		Tiers: map[string]string{"deep": "opus", "standard": "sonnet", "light": "qwen"},
+		Tasks: map[string]string{"implementation": "large-task"},
+	}
+	fit := classifyTierFit(cfg, rule, reqWith("hello"), 0)
+	if !fit.Eligible["light"] || fit.Required >= 8000 {
+		t.Errorf("task output cap inflated tier requirement: required=%d eligible=%v", fit.Required, fit.Eligible)
+	}
+}
+
 func TestRemapTierSmallestFitting(t *testing.T) {
 	cfg := sizedCfg()
 	rule := config.RouteRule{Tiers: map[string]string{"deep": "opus", "standard": "sonnet", "light": "qwen"}}

@@ -124,7 +124,14 @@ func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *conf
 			}
 			var taskReason string
 			alias, taskReason = a.applyTask(cfg, rule, fit, tier, prev.task)
-			a.cacheDecision(key, hash, tier, prev.task)
+			// A tool-result continuation has no user text, so preserve the
+			// opening turn's hash. This keeps retries of the opening request
+			// sticky after the continuation has updated the cached tier.
+			cachedHash := hash
+			if !isNewTurn {
+				cachedHash = prev.userHash
+			}
+			a.cacheDecision(key, cachedHash, tier, prev.task)
 			return alias, tier, combineReason(taskReason, sizeReason)
 		}
 	}
@@ -304,7 +311,7 @@ func (s *Server) classifyViaBackend(ctx context.Context, rule config.RouteRule, 
 	for _, block := range resp.Content {
 		if block.Type == "text" {
 			word := strings.ToLower(strings.TrimSpace(block.Text))
-			word = strings.Trim(word, ".\"' \n")
+			word = strings.Trim(word, "`.\"' \n")
 			return word, nil
 		}
 	}

@@ -57,9 +57,8 @@ func parseTaskLabel(s string) string {
 
 // classifyTaskViaBackend runs the combined tier+task classifier prompt
 // through the router's own backends. Unparseable or non-JSON classifier
-// output fails open: it returns ("", "", nil) rather than an error, so the
-// caller's existing tier-fallback path (empty tier -> rule.Default) handles
-// it exactly like a garbage plain-tier answer already does.
+// output returns an error; route() handles that error by failing open to the
+// configured tier and dropping the task override.
 func (s *Server) classifyTaskViaBackend(ctx context.Context, rule config.RouteRule, cfg *config.Config, summary string) (tier, task string, err error) {
 	resp, err := s.runClassifier(ctx, rule, cfg, taskClassifierPrompt+summary, 60)
 	if err != nil {
@@ -78,7 +77,9 @@ func (s *Server) classifyTaskViaBackend(ctx context.Context, rule config.RouteRu
 		text = strings.TrimSpace(text)
 		var d taskTierDecision
 		if err := json.Unmarshal([]byte(text), &d); err != nil {
-			return "", "", nil // fail open: no task/tier signal, not a hard error
+			// Return an error so route() still fails open to the configured tier,
+			// while retaining an observable classifier-failure signal for callers.
+			return "", "", fmt.Errorf("parse task classifier output: %w", err)
 		}
 		return strings.ToLower(strings.TrimSpace(d.Tier)), parseTaskLabel(d.Task), nil
 	}
