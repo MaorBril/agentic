@@ -283,6 +283,70 @@ func TestStreamCancellation(t *testing.T) {
 	}
 }
 
+func TestStreamIdleTimeout(t *testing.T) {
+	// A stalled upstream that never sends a byte and never closes the
+	// connection (the reported "stuck, needs a manual interrupt" symptom —
+	// no scanner EOF, no ctx cancellation) must still give up once idleTimeout
+	// elapses, rather than hang forever on ctx.Done().
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	rec := httptest.NewRecorder()
+	state := newStreamState(anthropic.NewSSEWriter(rec), "gpt")
+	state.keepAliveEvery = time.Hour // keep-alives shouldn't be what ends this
+	state.idleTimeout = 20 * time.Millisecond
+
+	done := make(chan string, 1)
+	go func() {
+		_, errType := state.Run(context.Background(), pr)
+		done <- errType
+	}()
+	select {
+	case errType := <-done:
+		if errType != "api_error" {
+			t.Errorf("errType = %q, want api_error", errType)
+		}
+		if !strings.Contains(rec.Body.String(), "no data for") {
+			t.Errorf("expected idle-timeout error event, got:\n%s", rec.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after idleTimeout")
+	}
+}
+
+func TestStreamIdleTimeoutResetsOnActivity(t *testing.T) {
+	// Any scanner activity — including provider noise that isn't a usable
+	// chunk — must reset the idle clock, so a slow-but-alive upstream isn't
+	// mistaken for a stalled one.
+	pr, pw := io.Pipe()
+	rec := httptest.NewRecorder()
+	state := newStreamState(anthropic.NewSSEWriter(rec), "gpt")
+	state.keepAliveEvery = time.Hour
+	state.idleTimeout = 60 * time.Millisecond
+
+	done := make(chan string, 1)
+	go func() {
+		_, errType := state.Run(context.Background(), pr)
+		done <- errType
+	}()
+	// Trickle blank/noise lines slower than one write per idleTimeout but
+	// well within it, for longer than idleTimeout's total span.
+	for i := 0; i < 4; i++ {
+		time.Sleep(25 * time.Millisecond)
+		io.WriteString(pw, ": keep-alive noise\n\n")
+	}
+	io.WriteString(pw, "data: {\"id\":\"c7\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	pw.Close()
+
+	select {
+	case errType := <-done:
+		if errType != "" {
+			t.Errorf("errType = %q, want success (empty)", errType)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return")
+	}
+}
+
 func TestStreamEmptyAfterKeepAlive(t *testing.T) {
 	// Upstream that goes quiet long enough for a keep-alive ping to open the
 	// message, then EOFs with zero chunks: still an error, not an empty
