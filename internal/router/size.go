@@ -70,8 +70,17 @@ type fitDecision struct {
 
 // classifyTierFit computes which tiers can hold the request. A tier is eligible
 // only if it fits BOTH the token budget and the provider's request-byte cap
-// (where either is known). When no tier has any known limit, it returns every
-// tier eligible with Required==0 — the backward-compat fast path.
+// (where either is known). When no tier — nor any task-mapped alias, see
+// below — has any known limit, it returns every tier eligible with
+// Required==0 — the backward-compat fast path.
+//
+// Task-mapped aliases (rule.Tasks) are folded into the "is sizing active at
+// all" and "shared output cap" computations even though Eligible is keyed by
+// tier only: a task target's own eligibility is checked separately (see
+// aliasFits, used by autoRouter.applyTask) against the same fit.Required/
+// fit.BodyBytes, so a task-only budget (no tier declares one) still gets a
+// real Required estimate to check against instead of always reading as
+// "unknown budget, always eligible".
 func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.MessagesRequest, bodyBytes int64) fitDecision {
 	elig := map[string]bool{}
 	for t := range rule.Tiers {
@@ -80,7 +89,7 @@ func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.M
 
 	anyTokenKnown := false
 	anyByteKnown := false
-	for _, alias := range rule.Tiers {
+	checkAlias := func(alias string) {
 		if tierBudget(cfg, alias) > 0 {
 			anyTokenKnown = true
 		}
@@ -88,18 +97,31 @@ func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.M
 			anyByteKnown = true
 		}
 	}
+	for _, alias := range rule.Tiers {
+		checkAlias(alias)
+	}
+	for _, alias := range rule.Tasks {
+		checkAlias(alias)
+	}
 	if !anyTokenKnown && !anyByteKnown {
 		return fitDecision{Eligible: elig, BodyBytes: bodyBytes}
 	}
 
 	est := tokens.Estimate(req)
-	// Shared output cap: the largest MaxOutput among tiers, conservative (bias
-	// toward over-reserving, which biases toward remapping up — safe).
+	// Shared output cap: the largest MaxOutput among tiers and task targets,
+	// conservative (bias toward over-reserving, which biases toward
+	// remapping up — safe).
 	maxCap := 0
-	for _, alias := range rule.Tiers {
+	updateCap := func(alias string) {
 		if m, ok := cfg.Models[alias]; ok && m.MaxOutput > maxCap {
 			maxCap = m.MaxOutput
 		}
+	}
+	for _, alias := range rule.Tiers {
+		updateCap(alias)
+	}
+	for _, alias := range rule.Tasks {
+		updateCap(alias)
 	}
 	reqMax := 0
 	if req != nil {
@@ -109,13 +131,7 @@ func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.M
 
 	var filtered []string
 	for tier, alias := range rule.Tiers {
-		fits := true
-		if b := tierBudget(cfg, alias); b > 0 && required > int64(b) {
-			fits = false
-		}
-		if mb := tierMaxRequestBytes(cfg, alias); mb > 0 && bodyBytes > int64(mb) {
-			fits = false
-		}
+		fits := aliasFits(cfg, alias, required, bodyBytes)
 		elig[tier] = fits
 		if !fits {
 			filtered = append(filtered, tier)
@@ -123,6 +139,20 @@ func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.M
 	}
 	sort.Strings(filtered)
 	return fitDecision{Eligible: elig, Required: required, EstInput: est, BodyBytes: bodyBytes, Filtered: filtered}
+}
+
+// aliasFits reports whether a model alias (a tier's target or a task's
+// target — anything resolvable via config) can hold a request needing
+// `required` input+output tokens and `bodyBytes` of raw body, considering
+// only limits that are actually known (0/unset never filters).
+func aliasFits(cfg *config.Config, alias string, required, bodyBytes int64) bool {
+	if b := tierBudget(cfg, alias); b > 0 && required > int64(b) {
+		return false
+	}
+	if mb := tierMaxRequestBytes(cfg, alias); mb > 0 && bodyBytes > int64(mb) {
+		return false
+	}
+	return true
 }
 
 // onlyEligibleTier returns the single eligible tier when exactly one remains,

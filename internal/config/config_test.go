@@ -108,6 +108,51 @@ profiles:
 	}
 }
 
+func TestTaskRoutingValidation(t *testing.T) {
+	base := `
+providers:
+  anthropic: {type: anthropic, base_url: https://api.anthropic.com}
+models:
+  haiku: {provider: anthropic, id: claude-haiku-4-5}
+  opus: {provider: anthropic, id: claude-opus-5}
+  grok: {provider: anthropic, id: grok-4.6}
+routing:
+  auto:
+    classifier: haiku
+    default: standard
+    tiers: {deep: opus, standard: opus, light: haiku}
+    tasks: {implementation: grok, critical_review: opus}
+`
+	cfg, err := Parse([]byte(base))
+	if err != nil {
+		t.Fatalf("valid task routing rejected: %v", err)
+	}
+	if cfg.Routing["auto"].Tasks["implementation"] != "grok" {
+		t.Fatalf("task mapping not parsed: %#v", cfg.Routing["auto"].Tasks)
+	}
+
+	cases := map[string]string{
+		"unknown task label": strings.Replace(base, "implementation: grok", "coding: grok", 1),
+		"unknown task alias": strings.Replace(base, "implementation: grok", "implementation: ghost", 1),
+	}
+	for name, yaml := range cases {
+		if _, err := Parse([]byte(yaml)); err == nil {
+			t.Errorf("%s: expected validation error", name)
+		}
+	}
+}
+
+func TestTaskLabelsAreRecognized(t *testing.T) {
+	for _, label := range TaskLabels {
+		if !IsTaskLabel(label) {
+			t.Errorf("TaskLabels contains unrecognized label %q", label)
+		}
+	}
+	if IsTaskLabel("coding") || IsTaskLabel("") {
+		t.Error("unknown task labels must be rejected")
+	}
+}
+
 func TestContextBudget(t *testing.T) {
 	cases := []struct {
 		name string

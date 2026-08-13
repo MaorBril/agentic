@@ -94,15 +94,54 @@ agentic routing set auto --classifier haiku \
     --deep opus --standard sonnet --light qwen
 ```
 
-`auto` now behaves like a model (`/model auto`, or `profiles: {model: auto}`). On each new user turn, the classifier reads the request and assigns a tier — planning and hard debugging go `deep`, ordinary coding goes `standard`, mechanical edits and verification go `light`. The decision sticks for the rest of the turn (tool results don't re-trigger it), so a task never flips models mid-flight. Classification failures fall back to `--default` (standard), and every decision is logged:
+`auto` now behaves like a model (`/model auto`, or `profiles: {model: auto}`). On each new user turn, the classifier reads the request and assigns a tier: planning and hard debugging go `deep`, ordinary coding goes `standard`, and mechanical edits and verification go `light`. The decision sticks for the rest of the turn, so tool results do not trigger another classification or flip models mid-flight. Classification failures fall back to `--default` (standard).
+
+Task overrides add a second routing dimension without another classifier request. They are useful when two tasks need similar capability but perform better on different models. The supported labels are `implementation`, `sql_data`, `debugging`, `code_review`, `architecture`, `security_review`, and `critical_review`:
+
+```yaml
+models:
+  opus:   {provider: anthropic, id: claude-opus-5}
+  fable:  {provider: anthropic, id: claude-fable-5}
+  grok:   {provider: xai,       id: grok-4.6, context_window: 500000}
+
+routing:
+  auto:
+    classifier: haiku
+    default: standard
+    tiers: {deep: opus, standard: sonnet, light: qwen}
+    tasks:
+      implementation: grok
+      sql_data: grok
+      debugging: grok
+      code_review: grok
+      architecture: fable
+      security_review: fable
+      critical_review: opus
+```
+
+Configure the same policy from the CLI with repeatable task flags; later `routing set` calls preserve existing task mappings unless a matching flag updates one:
+
+```bash
+agentic routing set auto --classifier haiku \
+    --deep opus --standard sonnet --light qwen \
+    --task implementation=grok --task sql_data=grok \
+    --task debugging=grok --task code_review=grok \
+    --task architecture=fable --task security_review=fable \
+    --task critical_review=opus
+agentic routing list
+```
+
+A recognized task mapping takes precedence over the selected tier. Unrecognized or unmatched work uses the tier normally. If the mapped model cannot hold the request, the router falls back to the smallest eligible capability tier. Pinned sessions (`pin_tiers` / `X-Agentic-Pin-Model`) bypass task and tier classification entirely. Task classification is a model-selection hint, not a security boundary; enforce sensitive-work policy separately.
+
+Every decision is logged, and task choices appear in the existing reason field:
 
 ```
 $ grep autoroute ~/.agentic/router.log
-... alias=auto tier=deep model=opus
-... alias=auto tier=light model=qwen
+... alias=auto tier=standard model=grok reason=task:implementation
+... alias=auto tier=deep model=fable reason=task:security_review
 ```
 
-`agentic cost --by model` then shows how spend actually distributed across tiers. Each classification costs one tiny request to the classifier model (~$0.0005 with haiku).
+`agentic cost --by model` then shows how spend actually distributed. Each turn uses one tiny tier-only or combined tier-and-task request to the classifier model (~$0.0005 with haiku). Because config parsing is strict, a config containing `tasks:` requires an agentic binary that supports task routing; older binaries reject the field instead of silently ignoring it.
 
 ## Auto Goal
 

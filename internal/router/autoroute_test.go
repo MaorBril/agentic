@@ -68,6 +68,110 @@ func TestAutoRouteSticksWithinTurn(t *testing.T) {
 	}
 }
 
+func TestAutoRouteTaskOverride(t *testing.T) {
+	calls := 0
+	rule := testRule()
+	rule.Tasks = map[string]string{"implementation": "grok", "architecture": "fable"}
+	a := newAuto("", nil, &calls)
+	a.classifyTask = func(context.Context, config.RouteRule, *config.Config, string) (string, string, error) {
+		calls++
+		return "standard", "implementation", nil
+	}
+	alias, tier, reason := a.route(context.Background(), rule, nil, body(`{"role":"user","content":"implement the endpoint"}`), "tasks")
+	if alias != "grok" || tier != "standard" || reason != "task:implementation" || calls != 1 {
+		t.Errorf("alias=%s tier=%s reason=%q calls=%d", alias, tier, reason, calls)
+	}
+}
+
+func TestAutoRouteTaskSticksWithinTurn(t *testing.T) {
+	calls := 0
+	rule := testRule()
+	rule.Tasks = map[string]string{"architecture": "fable"}
+	a := newAuto("", nil, &calls)
+	a.classifyTask = func(context.Context, config.RouteRule, *config.Config, string) (string, string, error) {
+		calls++
+		return "deep", "architecture", nil
+	}
+	a.route(context.Background(), rule, nil, body(`{"role":"user","content":"design the service"}`), "sticky-task")
+	continuation := body(`{"role":"user","content":"design the service"},
+	  {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read","input":{}}]},
+	  {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"data"}]}`)
+	alias, tier, reason := a.route(context.Background(), rule, nil, continuation, "sticky-task")
+	if alias != "fable" || tier != "deep" || reason != "task:architecture" || calls != 1 {
+		t.Errorf("alias=%s tier=%s reason=%q calls=%d", alias, tier, reason, calls)
+	}
+}
+
+func TestAutoRouteValidTaskWithInvalidTier(t *testing.T) {
+	calls := 0
+	rule := testRule()
+	rule.Tasks = map[string]string{"security_review": "fable"}
+	a := newAuto("", nil, &calls)
+	a.classifyTask = func(context.Context, config.RouteRule, *config.Config, string) (string, string, error) {
+		return "banana", "security_review", nil
+	}
+	alias, tier, reason := a.route(context.Background(), rule, nil, body(`{"role":"user","content":"review this auth flow"}`), "invalid-tier")
+	if alias != "fable" || tier != "standard" || reason != "task:security_review" {
+		t.Errorf("alias=%s tier=%s reason=%q", alias, tier, reason)
+	}
+}
+
+func TestAutoRouteTaskFailureDropsOverride(t *testing.T) {
+	calls := 0
+	rule := testRule()
+	rule.Tasks = map[string]string{"implementation": "grok"}
+	a := newAuto("", nil, &calls)
+	a.classifyTask = func(context.Context, config.RouteRule, *config.Config, string) (string, string, error) {
+		return "deep", "implementation", errors.New("classifier down")
+	}
+	alias, tier, reason := a.route(context.Background(), rule, nil, body(`{"role":"user","content":"implement it"}`), "task-failure")
+	if alias != "sonnet" || tier != "standard" || reason != "" {
+		t.Errorf("alias=%s tier=%s reason=%q", alias, tier, reason)
+	}
+}
+
+func TestAutoRouteTaskClassificationRunsWithOneEligibleTier(t *testing.T) {
+	calls := 0
+	rule := sizedRule()
+	rule.Tasks = map[string]string{"security_review": "opus"}
+	a := newAuto("", nil, &calls)
+	a.classifyTask = func(context.Context, config.RouteRule, *config.Config, string) (string, string, error) {
+		calls++
+		return "deep", "security_review", nil
+	}
+	huge := []byte(`{"model":"auto","max_tokens":100,"messages":[{"role":"user","content":"` + repeat("w ", 80000) + `"}]}`)
+	alias, tier, reason := a.route(context.Background(), rule, sizedCfg(), huge, "one-tier-task")
+	if alias != "opus" || tier != "deep" || reason != "task:security_review" || calls != 1 {
+		t.Errorf("alias=%s tier=%s reason=%q calls=%d", alias, tier, reason, calls)
+	}
+}
+
+func TestAutoRouteTaskSizeFallback(t *testing.T) {
+	calls := 0
+	rule := sizedRule()
+	rule.Tasks = map[string]string{"implementation": "qwen"}
+	a := newAuto("", nil, &calls)
+	a.classifyTask = func(context.Context, config.RouteRule, *config.Config, string) (string, string, error) {
+		return "standard", "implementation", nil
+	}
+	alias, tier, reason := a.route(context.Background(), rule, sizedCfg(), bigBody("implement "), "task-size")
+	if alias != "sonnet" || tier != "standard" || !contains(reason, "task:implementation:size-ineligible") {
+		t.Errorf("alias=%s tier=%s reason=%q", alias, tier, reason)
+	}
+}
+
+func TestAutoRouterResetCache(t *testing.T) {
+	calls := 0
+	a := newAuto("deep", nil, &calls)
+	request := body(`{"role":"user","content":"plan it"}`)
+	a.route(context.Background(), testRule(), nil, request, "reload")
+	a.resetCache()
+	a.route(context.Background(), testRule(), nil, request, "reload")
+	if calls != 2 {
+		t.Errorf("classifier calls=%d, want 2 after cache reset", calls)
+	}
+}
+
 func TestAutoRouteFallsBackOnFailure(t *testing.T) {
 	calls := 0
 	a := newAuto("", errors.New("classifier down"), &calls)

@@ -85,10 +85,18 @@ Claude Code treats the 400 as a terminal error (no retry-spin), which is why
 it's used over 413/429. The guard is skipped for `count_tokens` and for
 models with an unknown budget.
 
+**Task overrides.** A task-aware rule classifies task and tier in the same
+request. A configured task model takes precedence over the tier target, but it
+must pass the same context-budget and request-byte checks. If it cannot hold the
+request, the router uses the smallest eligible capability tier instead of trying
+another task model. The chosen task and any tier remap remain sticky for tool
+results in that turn. Pinned sessions bypass both task and tier routing.
+
 Both behaviors are observable: the router logs `autoroute_size` (Debug) with
 the estimate, required tokens, excluded tiers, and the remap; `route_decisions`
-gains a `reason` column (`size:light→standard`, `size:sticky:light→standard`)
-visible via the statusline and `agentic context`.
+gains a `reason` column (`size:light→standard`, `size:sticky:light→standard`,
+`task:implementation`, or `task:sql_data:size-ineligible`) visible via the
+statusline and `agentic context`.
 
 **Request-body byte cap.** Separate from the token budget: some upstreams cap
 the raw request body size (e.g. an nginx `client_max_body_size`), and a body can
