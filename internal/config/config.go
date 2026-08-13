@@ -36,6 +36,39 @@ type RouteRule struct {
 	Classifier string            `yaml:"classifier"` // model alias used to classify
 	Default    string            `yaml:"default"`    // tier when classification fails ("" = standard)
 	Tiers      map[string]string `yaml:"tiers"`      // deep/standard/light -> model alias
+	// Tasks optionally maps a fixed set of task labels (see TaskLabels) to a
+	// model alias that overrides the tier pick for that kind of work — e.g.
+	// routing security_review to a specific reviewer model regardless of
+	// which tier the request would otherwise land on. Absent/empty means
+	// exact tier-only behavior: no combined task classification happens, and
+	// routing is byte-for-byte identical to a rule with no Tasks at all.
+	Tasks map[string]string `yaml:"tasks"`
+}
+
+// TaskLabels is the fixed, closed set of task labels a task-aware routing
+// rule may map. Fixed (not user-extensible) because the classifier prompt
+// enumerates them by name and the allow-list parser validates classifier
+// output against exactly this set — fail-open (treat as "no task") for
+// anything else, never a dynamically-extended list.
+var TaskLabels = []string{
+	"implementation",
+	"sql_data",
+	"debugging",
+	"code_review",
+	"architecture",
+	"security_review",
+	"critical_review",
+}
+
+// IsTaskLabel reports whether s (expected already lowercased/trimmed) is one
+// of the fixed TaskLabels.
+func IsTaskLabel(s string) bool {
+	for _, l := range TaskLabels {
+		if l == s {
+			return true
+		}
+	}
+	return false
 }
 
 type Router struct {
@@ -283,6 +316,15 @@ func (c *Config) Validate() error {
 		if r.Default != "" {
 			if _, ok := r.Tiers[r.Default]; !ok {
 				return fmt.Errorf("config: routing %q default %q is not a tier", name, r.Default)
+			}
+		}
+		for label, alias := range r.Tasks {
+			if !IsTaskLabel(label) {
+				return fmt.Errorf("config: routing %q task %q is not a recognized label (want one of: %s)",
+					name, label, strings.Join(TaskLabels, ", "))
+			}
+			if _, ok := c.Models[alias]; !ok {
+				return fmt.Errorf("config: routing %q task %q references unknown model alias %q", name, label, alias)
 			}
 		}
 	}

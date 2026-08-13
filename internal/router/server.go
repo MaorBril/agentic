@@ -45,7 +45,7 @@ func NewServer(cfg *config.Config, token, dataDir string, st *store.Store, logge
 	s.cfg.Store(cfg)
 	s.pricing.Store(pricing.Load(dataDir, cfg))
 	s.gate = budget.NewGate(cfg, st, logger)
-	s.auto = &autoRouter{classify: s.classifyViaBackend, cache: map[string]decision{}, log: logger}
+	s.auto = &autoRouter{classify: s.classifyViaBackend, classifyTask: s.classifyTaskViaBackend, cache: map[string]decision{}, log: logger}
 	s.goal = &goalRouter{classify: s.classifyGoalViaBackend}
 	return s
 }
@@ -60,6 +60,10 @@ func (s *Server) Reload() error {
 	s.cfg.Store(cfg)
 	s.pricing.Store(pricing.Load(s.dataDir, cfg))
 	s.gate.SetConfig(cfg)
+	// A routing-rule edit (tiers, tasks, classifier) must apply to the very
+	// next request, not be masked by a sticky decision cached under the
+	// previous config.
+	s.auto.resetCache()
 	return nil
 }
 

@@ -24,7 +24,11 @@ import (
 // doesn't flip models mid-flight.
 type autoRouter struct {
 	classify func(ctx context.Context, rule config.RouteRule, cfg *config.Config, summary string) (string, error)
-	log      *slog.Logger
+	// classifyTask is used instead of classify when the rule is task-aware
+	// (len(rule.Tasks) > 0): one combined request returns both tier and
+	// task, so task-aware routing never costs a second classifier call.
+	classifyTask func(ctx context.Context, rule config.RouteRule, cfg *config.Config, summary string) (tier, task string, err error)
+	log          *slog.Logger
 
 	mu    sync.Mutex
 	cache map[string]decision // key: session id (or user-text hash when unattributed)
@@ -33,7 +37,23 @@ type autoRouter struct {
 type decision struct {
 	userHash string
 	tier     string
-	at       time.Time
+	// task is the classified task label ("" when the rule isn't task-aware,
+	// classification didn't run this turn, or the classifier's answer
+	// wasn't a recognized label). Retained across sticky continuations
+	// alongside tier so a task override survives mid-turn tool_result
+	// round-trips the same way the tier does.
+	task string
+	at   time.Time
+}
+
+// resetCache clears sticky per-session decisions. Called on config reload
+// (Server.Reload) so a routing-rule edit — tiers, tasks, classifier —
+// applies to the very next request instead of being masked by a sticky
+// decision cached under the previous config.
+func (a *autoRouter) resetCache() {
+	a.mu.Lock()
+	a.cache = map[string]decision{}
+	a.mu.Unlock()
 }
 
 const classifierPrompt = `You route requests inside a coding agent to a model tier. Reply with exactly one word: deep, standard, or light.
@@ -48,7 +68,12 @@ Request to classify:
 // route picks the concrete model alias for a dynamically-routed request. The
 // returned reason is a free-text note for observability — non-empty when
 // size-aware routing remapped the classifier's choice (e.g.
-// "size:light→standard"); empty for a plain classifier decision.
+// "size:light→standard") and/or a task label was classified and applied
+// (e.g. "task:security_review"); empty for a plain classifier decision on a
+// rule with no Tasks configured. When rule.Tasks is empty this function's
+// behavior is byte-for-byte identical to before task-aware routing existed:
+// the task branch below is only ever reached with task=="", which is a
+// documented no-op in applyTask.
 func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *config.Config, raw []byte, sessionID string) (alias, tier, reason string) {
 	fallback := rule.Default
 	if fallback == "" {
@@ -83,30 +108,43 @@ func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *conf
 	a.mu.Unlock()
 
 	// Continuations (tool results coming back) and retries of the same
-	// turn keep the tier that opened the turn.
+	// turn keep the tier (and task) that opened the turn.
 	if hasPrev && (!isNewTurn || prev.userHash == hash) {
 		if _, ok := rule.Tiers[prev.tier]; ok {
-			if fit.Eligible[prev.tier] {
-				return rule.Tiers[prev.tier], prev.tier, ""
+			tier = prev.tier
+			var sizeReason string
+			if !fit.Eligible[tier] {
+				// The sticky tier can't hold this (larger) continuation.
+				// Remap upward without re-classifying, and pin the cache so
+				// the rest of the turn stays on the remapped tier.
+				remapped := remapTier(cfg, rule, fit, tier)
+				a.logFit(rule, fit, tier, remapped, "sticky")
+				sizeReason = "size:sticky:" + tier + "→" + remapped
+				tier = remapped
 			}
-			// The sticky tier can't hold this (larger) continuation.
-			// Remap upward without re-classifying, and pin the cache so the
-			// rest of the turn stays on the remapped tier.
-			remapped := remapTier(cfg, rule, fit, prev.tier)
-			a.logFit(rule, fit, prev.tier, remapped, "sticky")
-			a.cacheDecision(key, hash, remapped)
-			return rule.Tiers[remapped], remapped, "size:sticky:" + prev.tier + "→" + remapped
+			var taskReason string
+			alias, taskReason = a.applyTask(cfg, rule, fit, tier, prev.task)
+			// A tool-result continuation has no user text, so preserve the
+			// opening turn's hash. This keeps retries of the opening request
+			// sticky after the continuation has updated the cached tier.
+			cachedHash := hash
+			if !isNewTurn {
+				cachedHash = prev.userHash
+			}
+			a.cacheDecision(key, cachedHash, tier, prev.task)
+			return alias, tier, combineReason(taskReason, sizeReason)
 		}
 	}
 	if userText == "" {
 		return rule.Tiers[fallback], fallback, ""
 	}
 
-	// When size filtering has left exactly one viable tier, skip the
-	// classifier call — there's nothing to decide.
-	if t, ok := onlyEligibleTier(fit); ok {
+	// A tier-only rule can skip classification when size filtering leaves one
+	// viable tier. Task-aware rules still classify once because the task may
+	// select a different model that also fits the request.
+	if t, ok := onlyEligibleTier(fit); ok && len(rule.Tasks) == 0 {
 		a.logFit(rule, fit, "", t, "only")
-		a.cacheDecision(key, hash, t)
+		a.cacheDecision(key, hash, t, "")
 		return rule.Tiers[t], t, ""
 	}
 
@@ -114,32 +152,93 @@ func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *conf
 		len(req.Messages), len(req.Tools), truncate(userText, 2000))
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	tier, err = a.classify(cctx, rule, cfg, summary)
-	if err != nil || rule.Tiers[tier] == "" {
+
+	var task string
+	if len(rule.Tasks) > 0 {
+		// Task-aware rule: one combined classifier request returns both
+		// tier and task — never a second call.
+		tier, task, err = a.classifyTask(cctx, rule, cfg, summary)
+	} else {
+		tier, err = a.classify(cctx, rule, cfg, summary)
+	}
+	if err != nil {
+		tier = fallback
+		task = ""
+	} else if rule.Tiers[tier] == "" {
+		// A valid task remains useful even when the classifier's tier token is
+		// malformed: the concrete task target comes from trusted local config.
+		// With no valid task, this simply fails open to the configured tier.
 		tier = fallback
 	}
 
 	// The classifier has no notion of size; if it picked a tier the request
 	// won't fit, remap upward to the smallest tier that does.
+	var sizeReason string
 	if fit.Required > 0 && !fit.Eligible[tier] {
 		chosen := tier
 		tier = remapTier(cfg, rule, fit, chosen)
 		a.logFit(rule, fit, chosen, tier, "remap")
-		reason = "size:" + chosen + "→" + tier
+		sizeReason = "size:" + chosen + "→" + tier
 	}
 
-	a.cacheDecision(key, hash, tier)
-	return rule.Tiers[tier], tier, reason
+	var taskReason string
+	alias, taskReason = a.applyTask(cfg, rule, fit, tier, task)
+	reason = combineReason(taskReason, sizeReason)
+
+	a.cacheDecision(key, hash, tier, task)
+	return alias, tier, reason
 }
 
-// cacheDecision stores a tier decision under key, flushing the cache when it
-// exceeds 1000 entries.
-func (a *autoRouter) cacheDecision(key, hash, tier string) {
+// applyTask resolves a classified task label to its rule.Tasks-mapped model
+// alias, overriding the tier's own alias when the mapping exists and the
+// mapped model can hold the request (aliasFits, the same size-aware check
+// tiers use). When the task is empty (no task classified, or the rule isn't
+// task-aware), unmapped, or size-ineligible, it falls back to the tier's
+// alias — which by this point has already been remapped through the
+// eligible tiers by the caller, so a size-ineligible task target still
+// resolves to *some* capable model rather than an oversized one.
+//
+// task=="" is a pure no-op (returns tierAlias, ""): this is what keeps a
+// rule with no Tasks configured byte-for-byte identical to tier-only
+// routing, since task is never anything but "" in that case.
+func (a *autoRouter) applyTask(cfg *config.Config, rule config.RouteRule, fit fitDecision, tier, task string) (alias, reason string) {
+	tierAlias := rule.Tiers[tier]
+	if task == "" {
+		return tierAlias, ""
+	}
+	candidate, mapped := rule.Tasks[task]
+	if !mapped || candidate == "" {
+		return tierAlias, ""
+	}
+	if fit.Required == 0 || aliasFits(cfg, candidate, fit.Required, fit.BodyBytes) {
+		return candidate, "task:" + task
+	}
+	a.logFit(rule, fit, task, tier, "task-size-ineligible")
+	return tierAlias, "task:" + task + ":size-ineligible"
+}
+
+// combineReason joins non-empty routing-reason components ("task:...",
+// "size:...") for observability, task first since task selection is the
+// conceptually primary decision and size just describes whether the
+// underlying tier had to move.
+func combineReason(parts ...string) string {
+	var nonEmpty []string
+	for _, p := range parts {
+		if p != "" {
+			nonEmpty = append(nonEmpty, p)
+		}
+	}
+	return strings.Join(nonEmpty, ";")
+}
+
+// cacheDecision stores a tier(+task) decision under key, flushing the cache
+// when it exceeds 1000 entries.
+func (a *autoRouter) cacheDecision(key, hash, tier, task string) {
 	a.mu.Lock()
 	if len(a.cache) > 1000 {
 		a.cache = map[string]decision{}
 	}
-	a.cache[key] = decision{userHash: hash, tier: tier, at: time.Now()}
+	a.cache[key] = decision{userHash: hash, tier: tier, task: task, at: time.Now()}
 	a.mu.Unlock()
 }
 
@@ -212,7 +311,7 @@ func (s *Server) classifyViaBackend(ctx context.Context, rule config.RouteRule, 
 	for _, block := range resp.Content {
 		if block.Type == "text" {
 			word := strings.ToLower(strings.TrimSpace(block.Text))
-			word = strings.Trim(word, ".\"' \n")
+			word = strings.Trim(word, "`.\"' \n")
 			return word, nil
 		}
 	}
