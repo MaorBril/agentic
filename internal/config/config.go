@@ -20,7 +20,7 @@ const (
 	ProviderCLI = "cli"
 
 	// CLI dialects — a closed set because the dialect determines argv shape,
-	// how the task text is passed, output extraction, and the login preflight.
+	// how the task text is passed, and output extraction.
 	CLIDialectCodex = "codex" // OpenAI Codex CLI: `codex exec`
 	CLIDialectGrok  = "grok"  // xAI Grok Build CLI: `grok -p`
 
@@ -344,6 +344,16 @@ func (c *Config) Validate() error {
 		}
 	}
 	for name, prof := range c.Profiles {
+		for what, alias := range map[string]string{"model": prof.Model, "small_fast": prof.SmallFast} {
+			if alias != "" && c.IsCLIAlias(alias) {
+				return fmt.Errorf("config: profile %q %s references cli alias %q — cli delegation is only available as an explicit subagent (agentic agents sync), not a session model", name, what, alias)
+			}
+		}
+		for tier, alias := range prof.Tiers {
+			if c.IsCLIAlias(alias) {
+				return fmt.Errorf("config: profile %q tier %q references cli alias %q — cli delegation is only available as an explicit subagent, not a tier fallback", name, tier, alias)
+			}
+		}
 		if prof.Passthrough {
 			continue
 		}
@@ -354,16 +364,10 @@ func (c *Config) Validate() error {
 			if !c.isModelRef(alias) {
 				return fmt.Errorf("config: profile %q %s references unknown model alias %q", name, what, alias)
 			}
-			if c.IsCLIAlias(alias) {
-				return fmt.Errorf("config: profile %q %s references cli alias %q — cli delegation is only available as an explicit subagent (agentic agents sync), not a session model", name, what, alias)
-			}
 		}
 		for tier, alias := range prof.Tiers {
 			if !c.isModelRef(alias) {
 				return fmt.Errorf("config: profile %q tier %q references unknown model alias %q", name, tier, alias)
-			}
-			if c.IsCLIAlias(alias) {
-				return fmt.Errorf("config: profile %q tier %q references cli alias %q — cli delegation is only available as an explicit subagent, not a tier fallback", name, tier, alias)
 			}
 		}
 		if prof.PinTiers && prof.Model == "" {

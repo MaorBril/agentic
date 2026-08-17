@@ -89,6 +89,17 @@ var modelsAddCmd = &cobra.Command{
 		if modelProvider == "" {
 			return fmt.Errorf("--provider is required")
 		}
+		cfg, _, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		p, ok := cfg.Providers[modelProvider]
+		if !ok {
+			return fmt.Errorf("unknown provider %q", modelProvider)
+		}
+		if p.Type != config.ProviderCLI && modelID == "" {
+			return fmt.Errorf("--id is required for %s providers", p.Type)
+		}
 		snippet := fmt.Sprintf("provider: %s\n", modelProvider)
 		if modelID != "" {
 			snippet += fmt.Sprintf("id: %s\n", yamlQuote(modelID))
@@ -160,7 +171,14 @@ var modelsTestCmd = &cobra.Command{
 				continue
 			}
 			start := time.Now()
-			err := probeModel(baseURL, token, alias)
+			timeout := 60 * time.Second
+			if cfg.Providers[model.Provider].Type == config.ProviderCLI {
+				timeout = 20 * time.Minute
+				if cfg.Providers[model.Provider].TimeoutMS > 0 {
+					timeout = time.Duration(cfg.Providers[model.Provider].TimeoutMS)*time.Millisecond + time.Minute
+				}
+			}
+			err := probeModel(baseURL, token, alias, timeout)
 			if err != nil {
 				failed++
 				fmt.Printf("✗ %-12s %v\n", alias, err)
@@ -175,7 +193,7 @@ var modelsTestCmd = &cobra.Command{
 	},
 }
 
-func probeModel(baseURL, token, alias string) error {
+func probeModel(baseURL, token, alias string, timeout time.Duration) error {
 	body := fmt.Sprintf(`{"model":%q,"max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`, alias)
 	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/messages", strings.NewReader(body))
 	if err != nil {
@@ -186,7 +204,10 @@ func probeModel(baseURL, token, alias string) error {
 	if cwd, err := os.Getwd(); err == nil {
 		req.Header.Set("X-Agentic-Cwd", cwd)
 	}
-	client := &http.Client{Timeout: 60 * time.Second}
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

@@ -148,6 +148,11 @@ providers: {p: {type: cli, dialect: codex}}
 models: {m: {provider: p}}
 profiles: {main: {model: m}}
 `,
+		"cli alias on passthrough profile": `
+providers: {p: {type: cli, dialect: codex}}
+models: {m: {provider: p}}
+profiles: {sub: {passthrough: true, model: m}}
+`,
 		"cli alias as classifier": `
 providers:
   p: {type: cli, dialect: codex}

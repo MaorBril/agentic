@@ -87,6 +87,12 @@ CLI running under your own subscription login (codex login / grok login):
 			if provDialect == "" {
 				return fmt.Errorf("--dialect is required for cli providers (%s | %s)", config.CLIDialectCodex, config.CLIDialectGrok)
 			}
+			if provBase != "" || provKeyEnv != "" || provMaxTok != "" || provMaxReq != 0 {
+				return fmt.Errorf("--base-url/--key-env/--max-tokens-param/--max-request-bytes do not apply to cli providers")
+			}
+			if provTimeout < 0 {
+				return fmt.Errorf("--timeout-ms must be >= 0")
+			}
 			snippet := fmt.Sprintf("type: %s\ndialect: %s\n", provType, provDialect)
 			if provCommand != "" {
 				snippet += fmt.Sprintf("command: %s\n", yamlQuote(provCommand))

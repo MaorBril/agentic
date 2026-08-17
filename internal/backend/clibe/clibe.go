@@ -6,9 +6,9 @@
 // session's working directory, so a request here is minutes of autonomous
 // work, not a completion — which is why config validation keeps cli aliases
 // out of auto-routing and profile tiers, and why failures are surfaced as
-// message text with end_turn instead of a retryable SSE error event: Claude
-// Code retries error events, and re-running a filesystem-mutating agent is
-// the one thing this backend must never cause.
+// message text with end_turn instead of a retryable HTTP/SSE error: Claude
+// Code retries those, and re-running a filesystem-mutating agent is the one
+// thing this backend must never cause.
 package clibe
 
 import (
@@ -41,9 +41,12 @@ import (
 const CwdHeader = "X-Agentic-Cwd"
 
 const (
-	defaultTimeout  = 20 * time.Minute
-	stderrTailBytes = 32 * 1024
-	pingInterval    = 15 * time.Second
+	defaultTimeout   = 20 * time.Minute
+	stderrTailBytes  = 32 * 1024
+	stdoutLimitBytes = 1 << 20
+	maxTaskBytes     = 100_000
+	pingInterval     = 15 * time.Second
+	teardownWait     = 5 * time.Second
 )
 
 // Executor is the process-exec seam (mirrors internal/eval's; duplicated so
@@ -55,17 +58,36 @@ type Executor interface {
 type OSExecutor struct{}
 
 func (OSExecutor) Run(ctx context.Context, dir string, env, argv []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	if len(argv) == 0 {
+		return errors.New("empty argv")
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir, cmd.Env, cmd.Stdin, cmd.Stdout, cmd.Stderr = dir, env, stdin, stdout, stderr
-	return cmd.Run()
+	isolateProcess(cmd)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		killProcessTree(cmd)
+		select {
+		case <-done:
+		case <-time.After(teardownWait):
+		}
+		return ctx.Err()
+	}
 }
 
 type Backend struct {
 	Exec     Executor
 	LookPath func(string) (string, error)
-	// Home overrides the login-preflight base directory (tests only; ""
-	// means os.UserHomeDir).
-	Home string
+	// Environ, when set, replaces os.Environ for the delegated process
+	// (tests only).
+	Environ func() []string
 }
 
 func New() *Backend {
@@ -87,9 +109,6 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 	if _, err := b.LookPath(bin); err != nil {
 		return refuse(w, fmt.Sprintf("%s CLI (%q) not found on PATH — install it first (%s)", prov.Dialect, bin, installHint(prov.Dialect)))
 	}
-	if msg := b.loginCheck(prov.Dialect); msg != "" {
-		return refuse(w, msg)
-	}
 
 	req, err := anthropic.ParseRequest(call.Raw)
 	if err != nil {
@@ -99,6 +118,9 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 	if task == "" {
 		return refuse(w, "cli delegation found no task text in the request")
 	}
+	if len(task) > maxTaskBytes {
+		return refuse(w, fmt.Sprintf("cli delegation task is %d bytes; keep it under %d so it can be passed as a single argv element", len(task), maxTaskBytes))
+	}
 
 	timeout := defaultTimeout
 	if prov.TimeoutMS > 0 {
@@ -106,66 +128,92 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 	}
 	argv := buildArgv(prov, call.Route.Model.ID, task)
 
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	// Open the stream before the run so keep-alive pings hold the
-	// connection through a multi-minute delegation.
+	// connection through a multi-minute delegation. A failed first write
+	// means the client is already gone — do not spawn.
 	var sse *anthropic.SSEWriter
 	estIn := estimateTokens(task)
 	if call.Envelope.Stream {
 		sse = anthropic.NewSSEWriter(w)
-		sse.Event("message_start", map[string]any{
+		if err := sse.Event("message_start", map[string]any{
 			"type": "message_start",
 			"message": anthropic.MessagesResponse{
 				ID: "msg_agentic_cli", Type: "message", Role: "assistant",
 				Model: call.Route.Alias, Content: []anthropic.ContentBlock{},
 				Usage: anthropic.Usage{InputTokens: estIn},
 			},
-		})
-		sse.Ping()
+		}); err != nil {
+			return backend.Result{Status: 499, ErrType: "client_disconnect", ErrMsg: "client disconnected before delegation", Usage: anthropic.Usage{InputTokens: estIn}, ReportedInput: estIn}
+		}
+		if err := sse.Ping(); err != nil {
+			return backend.Result{Status: 499, ErrType: "client_disconnect", ErrMsg: "client disconnected before delegation", Usage: anthropic.Usage{InputTokens: estIn}, ReportedInput: estIn}
+		}
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	var stdout bytes.Buffer
+	var stdout limitedBuffer
+	stdout.max = stdoutLimitBytes
 	stderr := &tailWriter{max: stderrTailBytes}
 	done := make(chan error, 1)
 	go func() {
-		done <- b.Exec.Run(runCtx, cwd, os.Environ(), argv, nil, &stdout, stderr)
+		done <- b.Exec.Run(runCtx, cwd, sanitizeEnv(b.environ()), argv, nil, &stdout, stderr)
 	}()
 	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 	var runErr error
+	timedOut := false
 wait:
 	for {
 		select {
 		case runErr = <-done:
 			break wait
+		case <-runCtx.Done():
+			timedOut = errors.Is(runCtx.Err(), context.DeadlineExceeded)
+			select {
+			case runErr = <-done:
+			case <-time.After(teardownWait):
+				if runErr == nil {
+					runErr = runCtx.Err()
+				}
+			}
+			break wait
 		case <-ticker.C:
-			if sse != nil {
-				sse.Ping() // single goroutine writes all events — no locking needed
+			if sse != nil && sse.Ping() != nil {
+				cancel()
 			}
 		}
 	}
 
-	// Client gone: the subprocess was killed via runCtx; nothing left to write.
-	if ctx.Err() != nil && !errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-		return backend.Result{Status: 499, ErrType: "client_disconnect", ErrMsg: "client disconnected mid-delegation"}
+	// Client gone after a completed run: keep the completed result. Only
+	// classify disconnect when cancellation actually stopped the process.
+	if ctx.Err() != nil && !timedOut && errors.Is(runErr, context.Canceled) {
+		return backend.Result{Status: 499, ErrType: "client_disconnect", ErrMsg: "client disconnected mid-delegation", Usage: anthropic.Usage{InputTokens: estIn}, ReportedInput: estIn}
 	}
 
-	text, res := stdoutText(stdout.Bytes()), backend.Result{Status: 200}
+	text := stdoutText(stdout.Bytes())
+	// After spawn, always write a finished assistant turn (HTTP 200 /
+	// end_turn). A 4xx/5xx or SSE error event would make Claude Code retry
+	// a filesystem-mutating agent. Status/ErrType on Result stay for logs.
+	res := backend.Result{Status: 200}
 	switch {
-	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
+	case timedOut || errors.Is(runErr, context.DeadlineExceeded):
 		text = fmt.Sprintf("agentic: %s delegation timed out after %s; partial changes may exist in %s", prov.Dialect, timeout, cwd)
-		res = backend.Result{Status: 502, ErrType: "api_error", ErrMsg: "delegation timeout"}
+		res.ErrType, res.ErrMsg = "api_error", "delegation timeout"
 	case runErr != nil:
 		msg := runErr.Error()
 		if tail := stderr.String(); tail != "" {
 			msg += ": " + tail
 		}
 		text = fmt.Sprintf("agentic: %s delegation failed (%s)", prov.Dialect, msg)
-		res = backend.Result{Status: 502, ErrType: "api_error", ErrMsg: truncate(msg, 512)}
+		res.ErrType, res.ErrMsg = "api_error", truncate(msg, 512)
 	case text == "":
 		text = fmt.Sprintf("agentic: %s delegation produced no output", prov.Dialect)
-		res = backend.Result{Status: 502, ErrType: "api_error", ErrMsg: "empty delegation output"}
+		res.ErrType, res.ErrMsg = "api_error", "empty delegation output"
+	}
+	if stdout.truncated {
+		text += "\n\nagentic: stdout truncated at 1MiB"
 	}
 	// Heuristic usage so the delegation shows up in `agentic cost` as a $0
 	// unpriced row (validation forbids pricing on cli models).
@@ -173,27 +221,24 @@ wait:
 	res.ReportedInput = estIn
 
 	if sse != nil {
-		sse.Event("content_block_start", map[string]any{
+		_ = sse.Event("content_block_start", map[string]any{
 			"type": "content_block_start", "index": 0,
 			"content_block": map[string]string{"type": "text", "text": ""},
 		})
-		sse.Event("content_block_delta", map[string]any{
+		_ = sse.Event("content_block_delta", map[string]any{
 			"type": "content_block_delta", "index": 0,
 			"delta": map[string]string{"type": "text_delta", "text": text},
 		})
-		sse.Event("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
-		sse.Event("message_delta", map[string]any{
+		_ = sse.Event("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
+		_ = sse.Event("message_delta", map[string]any{
 			"type":  "message_delta",
 			"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
 			"usage": map[string]int64{"input_tokens": res.Usage.InputTokens, "output_tokens": res.Usage.OutputTokens},
 		})
-		sse.Event("message_stop", map[string]any{"type": "message_stop"})
+		_ = sse.Event("message_stop", map[string]any{"type": "message_stop"})
 		return res
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if res.Status >= 400 {
-		w.WriteHeader(res.Status)
-	}
 	json.NewEncoder(w).Encode(anthropic.MessagesResponse{
 		ID: "msg_agentic_cli", Type: "message", Role: "assistant",
 		Model:      call.Route.Alias,
@@ -228,33 +273,39 @@ func refuse(w http.ResponseWriter, msg string) backend.Result {
 	return backend.Result{Status: 400, ErrType: "invalid_request_error", ErrMsg: truncate(msg, 512)}
 }
 
-// loginCheck cheaply detects a missing subscription login before spending a
-// subprocess spawn. Heuristic by design: the auth file existing doesn't prove
-// the token is fresh (the CLI itself is the authority and will fail with its
-// own message), but its absence proves login never happened.
-func (b *Backend) loginCheck(dialect string) string {
-	home := b.Home
-	if home == "" {
-		home, _ = os.UserHomeDir()
+func (b *Backend) environ() []string {
+	if b.Environ != nil {
+		return b.Environ()
 	}
-	switch dialect {
-	case config.CLIDialectCodex:
-		dir := os.Getenv("CODEX_HOME")
-		if dir == "" {
-			dir = filepath.Join(home, ".codex")
-		}
-		if _, err := os.Stat(filepath.Join(dir, "auth.json")); err != nil {
-			return "codex CLI is not logged in — run `codex login` (uses your ChatGPT subscription)"
-		}
-	case config.CLIDialectGrok:
-		if os.Getenv("XAI_API_KEY") != "" {
-			return ""
-		}
-		if _, err := os.Stat(filepath.Join(home, ".grok", "auth.json")); err != nil {
-			return "grok CLI is not logged in — run `grok login` (uses your SuperGrok/X Premium+ subscription)"
-		}
+	return os.Environ()
+}
+
+// sanitizeEnv drops agentic/router credentials and unrelated provider keys
+// from the delegated process. The peer CLI authenticates itself from its own
+// login; it does not need the launcher's secrets.
+func sanitizeEnv(env []string) []string {
+	drop := map[string]bool{
+		"ANTHROPIC_BASE_URL":         true,
+		"ANTHROPIC_AUTH_TOKEN":       true,
+		"ANTHROPIC_API_KEY":          true,
+		"ANTHROPIC_CUSTOM_HEADERS":   true,
+		"ANTHROPIC_MODEL":            true,
+		"ANTHROPIC_SMALL_FAST_MODEL": true,
+		"CLAUDE_CODE_SUBAGENT_MODEL": true,
+		"AGENTIC_SESSION_ID":         true,
+		"AGENTIC_PROFILE":            true,
+		"OPENAI_API_KEY":             true,
+		"XAI_API_KEY":                true,
 	}
-	return ""
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, _, _ := strings.Cut(kv, "=")
+		if drop[key] || strings.HasPrefix(key, "ANTHROPIC_DEFAULT_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 func installHint(dialect string) string {
@@ -376,3 +427,27 @@ func (t *tailWriter) Write(p []byte) (int, error) {
 func (t *tailWriter) String() string {
 	return strings.TrimSpace(string(t.buf))
 }
+
+// limitedBuffer keeps at most max bytes and records whether it discarded the
+// rest, so a verbose CLI cannot grow the shared router leader without bound.
+type limitedBuffer struct {
+	buf       bytes.Buffer
+	max       int
+	truncated bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	remain := b.max - b.buf.Len()
+	if remain <= 0 {
+		b.truncated = true
+		return len(p), nil
+	}
+	if len(p) > remain {
+		b.buf.Write(p[:remain])
+		b.truncated = true
+		return len(p), nil
+	}
+	return b.buf.Write(p)
+}
+
+func (b *limitedBuffer) Bytes() []byte { return b.buf.Bytes() }

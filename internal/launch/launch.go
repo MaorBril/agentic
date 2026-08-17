@@ -91,6 +91,9 @@ func Run(ctx context.Context, cfg *config.Config, dataDir string, opts Options, 
 
 		model := prof.Model
 		if opts.ModelFlag != "" {
+			if cfg.IsCLIAlias(opts.ModelFlag) {
+				return fmt.Errorf("cli alias %q is only available as an explicit subagent (agentic-%s), not a session model", opts.ModelFlag, opts.ModelFlag)
+			}
 			model = opts.ModelFlag
 		}
 		cwd, _ := os.Getwd()

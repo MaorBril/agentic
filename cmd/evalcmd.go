@@ -138,6 +138,9 @@ func checkEvalModel(cfg *config.Config, what, alias string) error {
 		return fmt.Errorf("--%s model alias is required", what)
 	}
 	if _, ok := cfg.Models[alias]; ok {
+		if cfg.IsCLIAlias(alias) {
+			return fmt.Errorf("--%s %q is a cli alias — eval pins the whole candidate to one model, and cli aliases are explicit-subagent-only", what, alias)
+		}
 		return nil
 	}
 	if _, ok := cfg.Routing[alias]; ok {
