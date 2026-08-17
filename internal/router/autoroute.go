@@ -348,6 +348,9 @@ func (s *Server) runClassifier(ctx context.Context, rule config.RouteRule, cfg *
 	case config.ProviderOpenAI:
 		be = s.oai
 	default:
+		// Deliberately narrower than handleMessages' dispatch: config
+		// validation forbids cli-type aliases as classifiers, so this
+		// error is the backstop, not a missing case.
 		return nil, fmt.Errorf("classifier provider type %q unsupported", route.Provider.Type)
 	}
 	res := be.Messages(ctx, call, rec)

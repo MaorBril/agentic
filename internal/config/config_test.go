@@ -108,6 +108,84 @@ profiles:
 	}
 }
 
+func TestCLIProviderValidation(t *testing.T) {
+	valid := `
+providers:
+  codex: {type: cli, dialect: codex, sandbox: workspace-write, timeout_ms: 60000}
+  grok: {type: cli, dialect: grok, command: /opt/bin/grok}
+models:
+  codex: {provider: codex}
+  grok-fast: {provider: grok, id: grok-code-fast}
+`
+	cfg, err := Parse([]byte(valid))
+	if err != nil {
+		t.Fatalf("valid cli config rejected: %v", err)
+	}
+	if cfg.Providers["codex"].Bin() != "codex" || cfg.Providers["grok"].Bin() != "/opt/bin/grok" {
+		t.Errorf("unexpected binaries: codex=%q grok=%q", cfg.Providers["codex"].Bin(), cfg.Providers["grok"].Bin())
+	}
+	if !cfg.IsCLIAlias("codex") || cfg.IsCLIAlias("missing") {
+		t.Errorf("IsCLIAlias returned unexpected result")
+	}
+
+	cases := map[string]string{
+		"missing dialect":        `providers: {p: {type: cli}}`,
+		"unknown dialect":        `providers: {p: {type: cli, dialect: gemini}}`,
+		"base url forbidden":     `providers: {p: {type: cli, dialect: codex, base_url: http://x}}`,
+		"grok sandbox forbidden": `providers: {p: {type: cli, dialect: grok, sandbox: workspace-write}}`,
+		"invalid codex sandbox":  `providers: {p: {type: cli, dialect: codex, sandbox: unrestricted}}`,
+		"negative timeout":       `providers: {p: {type: cli, dialect: codex, timeout_ms: -1}}`,
+		"cli model pricing forbidden": `
+providers: {p: {type: cli, dialect: codex}}
+models: {m: {provider: p, pricing: {input: 1, output: 1}}}
+`,
+		"cli model context forbidden": `
+providers: {p: {type: cli, dialect: codex}}
+models: {m: {provider: p, context_window: 200000}}
+`,
+		"cli alias as profile model": `
+providers: {p: {type: cli, dialect: codex}}
+models: {m: {provider: p}}
+profiles: {main: {model: m}}
+`,
+		"cli alias on passthrough profile": `
+providers: {p: {type: cli, dialect: codex}}
+models: {m: {provider: p}}
+profiles: {sub: {passthrough: true, model: m}}
+`,
+		"cli alias as classifier": `
+providers:
+  p: {type: cli, dialect: codex}
+  a: {type: anthropic, base_url: https://api.anthropic.com}
+models:
+  m: {provider: p}
+  sonnet: {provider: a, id: claude-sonnet-5}
+routing:
+  auto: {classifier: m, tiers: {standard: sonnet}}
+`,
+		"cli alias as task target": `
+providers:
+  p: {type: cli, dialect: codex}
+  a: {type: anthropic, base_url: https://api.anthropic.com}
+models:
+  m: {provider: p}
+  sonnet: {provider: a, id: claude-sonnet-5}
+routing:
+  auto:
+    classifier: sonnet
+    tiers: {standard: sonnet}
+    tasks: {implementation: m}
+`,
+	}
+	for name, yaml := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte(yaml)); err == nil {
+				t.Error("expected validation error")
+			}
+		})
+	}
+}
+
 func TestTaskRoutingValidation(t *testing.T) {
 	base := `
 providers:

@@ -59,6 +59,10 @@ func definitionFor(cfg *config.Config, alias string) Definition {
 	name := Prefix + slug(alias)
 	m := cfg.Models[alias]
 
+	if cfg.Providers[m.Provider].Type == config.ProviderCLI {
+		return cliDefinition(cfg, alias, name)
+	}
+
 	// Describe the model concretely so the orchestrating model can tell the
 	// generated agents apart when choosing one.
 	var facts []string
@@ -89,6 +93,42 @@ Complete the task you were given and report the result. Your final message
 is the return value the caller receives, so make it the answer itself — not
 a description of what you did.
 `, name, alias, detail, alias, alias, orUnknown(m.ID))
+
+	return Definition{Alias: alias, Name: name, Filename: name + ".md", Body: body}
+}
+
+// cliDefinition describes a cli-delegation alias honestly: it is a whole
+// independent coding agent under the user's own subscription, not a model
+// completion — the orchestrator must know about the latency, filesystem
+// side effects, and the need for a self-contained prompt.
+func cliDefinition(cfg *config.Config, alias, name string) Definition {
+	m := cfg.Models[alias]
+	p := cfg.Providers[m.Provider]
+	cliName, subscription := "the "+p.Dialect+" CLI", "its own subscription"
+	switch p.Dialect {
+	case config.CLIDialectCodex:
+		cliName, subscription = "the Codex CLI (`codex exec`)", "your own ChatGPT subscription"
+	case config.CLIDialectGrok:
+		cliName, subscription = "the Grok Build CLI (`grok -p`)", "your own SuperGrok/X Premium+ subscription"
+	}
+	modelNote := ""
+	if m.ID != "" {
+		modelNote = fmt.Sprintf(" (model %s)", m.ID)
+	}
+
+	body := fmt.Sprintf(`---
+name: %s
+description: Delegates the ENTIRE task to %s%s running under %s. It is an independent coding agent with filesystem access in the working directory — expect minutes of latency, no incremental streaming, and possible file modifications. Use for self-contained subtasks you want a second agent to complete end to end.
+model: %s
+---
+
+Your task prompt is handed verbatim to %s, which runs its own agent loop in
+the session's working directory under %s. It sees NONE of the conversation —
+only this prompt — so make the task fully self-contained: what to do, where,
+and what to report back.
+
+The CLI's final message is returned as your result.
+`, name, cliName, modelNote, subscription, alias, cliName, subscription)
 
 	return Definition{Alias: alias, Name: name, Filename: name + ".md", Body: body}
 }
