@@ -27,7 +27,7 @@ func TestSessionEnvWithoutPinTiers(t *testing.T) {
 		SmallFast: "haiku",
 		Tiers:     map[string]string{"opus": "opus", "sonnet": "sonnet", "haiku": "haiku"},
 	}
-	env := sessionEnv(nil, "http://127.0.0.1:41100", "tok", "sess-1", "main", prof, prof.Model)
+	env := sessionEnv(nil, "http://127.0.0.1:41100", "tok", "sess-1", "main", prof, prof.Model, "/tmp/project")
 
 	if got := envVal(env, "ANTHROPIC_MODEL"); got != "gpt-5.6-sol" {
 		t.Errorf("ANTHROPIC_MODEL = %q, want gpt-5.6-sol", got)
@@ -45,6 +45,9 @@ func TestSessionEnvWithoutPinTiers(t *testing.T) {
 	if strings.Contains(headers, "X-Agentic-Pin-Model") {
 		t.Errorf("custom headers should not carry a pin when pin_tiers is off: %q", headers)
 	}
+	if !strings.Contains(headers, "X-Agentic-Cwd: /tmp/project") {
+		t.Errorf("custom headers missing session cwd: %q", headers)
+	}
 }
 
 // With pin_tiers, every tier fallback — including Claude Code's own subagent
@@ -57,7 +60,7 @@ func TestSessionEnvWithPinTiers(t *testing.T) {
 		Tiers:     map[string]string{"opus": "opus", "sonnet": "sonnet"}, // must be overridden
 		PinTiers:  true,
 	}
-	env := sessionEnv(nil, "http://127.0.0.1:41100", "tok", "sess-1", "main", prof, prof.Model)
+	env := sessionEnv(nil, "http://127.0.0.1:41100", "tok", "sess-1", "main", prof, prof.Model, "/tmp/project")
 
 	for _, key := range []string{
 		"ANTHROPIC_SMALL_FAST_MODEL",

@@ -16,6 +16,7 @@ import (
 	"github.com/maorbril/agentic/internal/anthropic"
 	"github.com/maorbril/agentic/internal/backend"
 	"github.com/maorbril/agentic/internal/backend/anthropicbe"
+	"github.com/maorbril/agentic/internal/backend/clibe"
 	"github.com/maorbril/agentic/internal/backend/openaibe"
 	"github.com/maorbril/agentic/internal/budget"
 	"github.com/maorbril/agentic/internal/config"
@@ -31,6 +32,7 @@ type Server struct {
 	store   *store.Store
 	anth    *anthropicbe.Backend
 	oai     *openaibe.Backend
+	cli     *clibe.Backend
 	gate    *budget.Gate
 	auto    *autoRouter
 	goal    *goalRouter
@@ -40,7 +42,7 @@ type Server struct {
 func NewServer(cfg *config.Config, token, dataDir string, st *store.Store, logger *slog.Logger) *Server {
 	s := &Server{
 		token: token, dataDir: dataDir, store: st,
-		anth: anthropicbe.New(), oai: openaibe.New(), log: logger,
+		anth: anthropicbe.New(), oai: openaibe.New(), cli: clibe.New(), log: logger,
 	}
 	s.cfg.Store(cfg)
 	s.pricing.Store(pricing.Load(dataDir, cfg))
@@ -204,7 +206,10 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 		}
 
 		profile := r.Header.Get("X-Agentic-Profile")
-		if !countTokens {
+		if !countTokens && route.Provider.Type != config.ProviderCLI {
+			// CLI delegation spends against the peer CLI's subscription, outside
+			// agentic's pricing data. A $0 API budget must not block capacity it
+			// neither meters nor pays for.
 			if msg := s.gate.Check(profile); msg != "" {
 				// 400 deliberately — 429/5xx would make Claude Code retry-spin;
 				// a 400 surfaces the message verbatim in the TUI.
@@ -220,6 +225,8 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 			be = s.anth
 		case config.ProviderOpenAI:
 			be = s.oai
+		case config.ProviderCLI:
+			be = s.cli
 		default:
 			anthropic.WriteError(w, 501, "api_error",
 				fmt.Sprintf("agentic: provider type %q not implemented (model %q)", route.Provider.Type, env.Model))
@@ -245,6 +252,11 @@ func (s *Server) recordUsage(r *http.Request, route config.Resolved, alias strin
 	}
 	cost, priced := s.pricing.Load().Cost(route.Model.ID,
 		u.InputTokens, u.OutputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
+	if route.Provider.Type == config.ProviderCLI {
+		// Even when the optional CLI model ID happens to match an entry in the
+		// API price table, subscription spend is opaque to agentic.
+		cost, priced = 0, false
+	}
 	budget := route.Model.ContextBudget()
 	ev := store.UsageEvent{
 		TS:               time.Now(),

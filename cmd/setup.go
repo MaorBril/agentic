@@ -102,13 +102,18 @@ providers:
   #   type: openai                       # Ollama / vLLM / any OpenAI-compatible server
   #   base_url: http://localhost:11434/v1
   #   api_key_env: ""
+  # codex:
+  #   type: cli                          # whole-task delegation to the official CLI
+  #   dialect: codex                     # codex | grok
+  #   sandbox: workspace-write           # codex only
 
 models:                # alias -> upstream; aliases flow into ANTHROPIC_MODEL
   opus:   {provider: anthropic, id: claude-opus-4-8}
   sonnet: {provider: anthropic, id: claude-sonnet-5}
   haiku:  {provider: anthropic, id: claude-haiku-4-5}
-  # gpt:  {provider: openai, id: gpt-5.2, reasoning: effort, max_output: 16384}
-  # grok: {provider: xai, id: grok-4}
+  # gpt:   {provider: openai, id: gpt-5.2, reasoning: effort, max_output: 16384}
+  # grok:  {provider: xai, id: grok-4}
+  # codex: {provider: codex}             # id optional; explicit subagent use only
 
 profiles:
   main:

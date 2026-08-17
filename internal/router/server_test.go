@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/maorbril/agentic/internal/anthropic"
+	"github.com/maorbril/agentic/internal/backend"
 	"github.com/maorbril/agentic/internal/config"
 	"github.com/maorbril/agentic/internal/store"
 )
@@ -113,6 +115,122 @@ func TestOpenAIStreamThroughRouter(t *testing.T) {
 	}
 	if rows[0].Key != "sess-test" || rows[0].InputTokens != 11 || rows[0].OutputTokens != 3 {
 		t.Errorf("usage row: %+v", rows[0])
+	}
+}
+
+func TestCLIProviderDispatchesThroughRouter(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Providers: map[string]config.Provider{
+			"codex": {Type: config.ProviderCLI, Dialect: config.CLIDialectCodex},
+		},
+		Models: map[string]config.Model{
+			"codex": {Provider: "codex"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "agentic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := NewServer(cfg, testToken, dir, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.cli.LookPath = func(string) (string, error) { return "", fmt.Errorf("not installed") }
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/messages", strings.NewReader(
+		`{"model":"codex","messages":[{"role":"user","content":"fix it"}]}`))
+	req.Header.Set("x-api-key", testToken)
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("X-Agentic-Cwd", t.TempDir())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "Codex") && !strings.Contains(string(body), "codex") {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "not found on PATH") {
+		t.Errorf("cli backend refusal missing from router response: %s", body)
+	}
+}
+
+func TestCLIUsageStaysUnpricedWhenModelIDHasAPIPrice(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Providers: map[string]config.Provider{
+			"codex": {Type: config.ProviderCLI, Dialect: config.CLIDialectCodex},
+		},
+		Models: map[string]config.Model{
+			"codex": {Provider: "codex", ID: "claude-sonnet-5"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "agentic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := NewServer(cfg, testToken, dir, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.recordUsage(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), config.Resolved{
+		Alias: "codex", ProviderName: "codex", Provider: cfg.Providers["codex"], Model: cfg.Models["codex"],
+	}, "codex", backend.Result{Status: 200, Usage: anthropic.Usage{InputTokens: 1000, OutputTokens: 1000}}, time.Millisecond)
+
+	rows, err := st.SpendSince(time.Now().Add(-time.Minute), "model")
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%v err=%v", rows, err)
+	}
+	if rows[0].CostUSD != 0 || rows[0].Unpriced != 1 {
+		t.Errorf("CLI subscription usage must remain unpriced: %+v", rows[0])
+	}
+}
+
+func TestCLIDelegationBypassesAPIBudgetGate(t *testing.T) {
+	dir := t.TempDir()
+	hardStop := true
+	cfg := &config.Config{
+		Providers: map[string]config.Provider{
+			"codex": {Type: config.ProviderCLI, Dialect: config.CLIDialectCodex},
+		},
+		Models:  map[string]config.Model{"codex": {Provider: "codex"}},
+		Budgets: &config.Budget{Daily: 0.01, HardStop: &hardStop},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "agentic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.RecordUsage(store.UsageEvent{TS: time.Now(), CostUSD: 1, Priced: true}); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(cfg, testToken, dir, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.cli.LookPath = func(string) (string, error) { return "", fmt.Errorf("not installed") }
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/messages", strings.NewReader(
+		`{"model":"codex","messages":[{"role":"user","content":"fix it"}]}`))
+	req.Header.Set("x-api-key", testToken)
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("X-Agentic-Cwd", t.TempDir())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(body), "budget exceeded") || !strings.Contains(string(body), "not found on PATH") {
+		t.Fatalf("CLI request should reach CLI backend despite API budget: status=%d body=%s", resp.StatusCode, body)
 	}
 }
 

@@ -93,7 +93,8 @@ func Run(ctx context.Context, cfg *config.Config, dataDir string, opts Options, 
 		if opts.ModelFlag != "" {
 			model = opts.ModelFlag
 		}
-		env = sessionEnv(env, mgr.BaseURL(), token, sessionID, profName, prof, model)
+		cwd, _ := os.Getwd()
+		env = sessionEnv(env, mgr.BaseURL(), token, sessionID, profName, prof, model, cwd)
 
 		recordSession(dataDir, sessionID, profName, true)
 		defer func() {
@@ -135,15 +136,24 @@ func Run(ctx context.Context, cfg *config.Config, dataDir string, opts Options, 
 // sessionEnv assembles the child process environment for a non-passthrough
 // profile: router creds, model selection, and the X-Agentic-* headers Claude
 // Code carries transparently on every request so the router can attribute
-// spend to this session and (when pinned) enforce the pin. Extracted from
-// Run so PinTiers behavior is directly testable without spawning a router
-// or a claude process.
-func sessionEnv(env []string, baseURL, token, sessionID, profName string, prof config.Profile, model string) []string {
+// spend to this session and (when pinned) enforce the pin. cwd rides along as
+// X-Agentic-Cwd so cli-delegation backends run the peer CLI in the session's
+// directory (the router leader is a shared long-lived process whose own cwd
+// is meaningless). Extracted from Run so PinTiers behavior is directly
+// testable without spawning a router or a claude process.
+func sessionEnv(env []string, baseURL, token, sessionID, profName string, prof config.Profile, model, cwd string) []string {
 	env = setEnv(env, "ANTHROPIC_BASE_URL", baseURL)
 	env = setEnv(env, "ANTHROPIC_AUTH_TOKEN", token)
 	env = unsetEnv(env, "ANTHROPIC_API_KEY")
 	if model != "" {
 		env = setEnv(env, "ANTHROPIC_MODEL", model)
+	}
+	// Header values must be single-line; a pathological cwd must not let one
+	// header smuggle another.
+	cwd = strings.NewReplacer("\n", "", "\r", "").Replace(cwd)
+	cwdHeader := ""
+	if cwd != "" {
+		cwdHeader = "\nX-Agentic-Cwd: " + cwd
 	}
 	if prof.PinTiers && model != "" {
 		// Pin every tier fallback — including Claude Code's own subagent
@@ -157,7 +167,7 @@ func sessionEnv(env []string, baseURL, token, sessionID, profName string, prof c
 		env = setEnv(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL", model)
 		env = setEnv(env, "CLAUDE_CODE_SUBAGENT_MODEL", model)
 		env = setEnv(env, "ANTHROPIC_CUSTOM_HEADERS",
-			fmt.Sprintf("X-Agentic-Session: %s\nX-Agentic-Profile: %s\nX-Agentic-Pin-Model: %s", sessionID, profName, model))
+			fmt.Sprintf("X-Agentic-Session: %s\nX-Agentic-Profile: %s\nX-Agentic-Pin-Model: %s%s", sessionID, profName, model, cwdHeader))
 	} else {
 		if prof.SmallFast != "" {
 			env = setEnv(env, "ANTHROPIC_SMALL_FAST_MODEL", prof.SmallFast)
@@ -166,7 +176,7 @@ func sessionEnv(env []string, baseURL, token, sessionID, profName string, prof c
 			env = setEnv(env, "ANTHROPIC_DEFAULT_"+strings.ToUpper(tier)+"_MODEL", alias)
 		}
 		env = setEnv(env, "ANTHROPIC_CUSTOM_HEADERS",
-			fmt.Sprintf("X-Agentic-Session: %s\nX-Agentic-Profile: %s", sessionID, profName))
+			fmt.Sprintf("X-Agentic-Session: %s\nX-Agentic-Profile: %s%s", sessionID, profName, cwdHeader))
 	}
 	env = setEnv(env, "AGENTIC_SESSION_ID", sessionID)
 	env = setEnv(env, "AGENTIC_PROFILE", profName)

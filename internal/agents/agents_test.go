@@ -55,6 +55,33 @@ func TestDesiredEmitsAliasAsModel(t *testing.T) {
 	}
 }
 
+func TestDesiredDescribesCLIDelegation(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.Provider{
+			"codex-cli": {Type: config.ProviderCLI, Dialect: config.CLIDialectCodex},
+		},
+		Models: map[string]config.Model{
+			"codex": {Provider: "codex-cli"},
+		},
+	}
+	got := Desired(cfg)
+	if len(got) != 1 {
+		t.Fatalf("got %d definitions, want 1", len(got))
+	}
+	body := got[0].Body
+	for _, want := range []string{
+		"model: codex",
+		"Delegates the ENTIRE task",
+		"your own ChatGPT subscription",
+		"possible file modifications",
+		"It sees NONE of the conversation",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("cli definition missing %q:\n%s", want, body)
+		}
+	}
+}
+
 // Routing rules are classifier rules, not concrete models — a subagent that
 // silently re-tiers itself would make the chosen model unpredictable.
 func TestDesiredExcludesRoutingRules(t *testing.T) {

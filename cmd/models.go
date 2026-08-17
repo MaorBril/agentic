@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -81,13 +82,17 @@ var modelsAddCmd = &cobra.Command{
 	Short: "Add or update a model alias",
 	Example: `  agentic models add gpt  --provider openai --id gpt-5.2 --reasoning effort
   agentic models add grok --provider xai --id grok-4
-  agentic models add qwen --provider local --id qwen3-coder-30b`,
+  agentic models add qwen --provider local --id qwen3-coder-30b
+  agentic models add codex --provider codex`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if modelProvider == "" || modelID == "" {
-			return fmt.Errorf("--provider and --id are required")
+		if modelProvider == "" {
+			return fmt.Errorf("--provider is required")
 		}
-		snippet := fmt.Sprintf("provider: %s\nid: %s\n", modelProvider, yamlQuote(modelID))
+		snippet := fmt.Sprintf("provider: %s\n", modelProvider)
+		if modelID != "" {
+			snippet += fmt.Sprintf("id: %s\n", yamlQuote(modelID))
+		}
 		if modelReasoning != "" {
 			snippet += "reasoning: " + modelReasoning + "\n"
 		}
@@ -142,7 +147,18 @@ var modelsTestCmd = &cobra.Command{
 			sort.Strings(aliases)
 		}
 		failed := 0
+		explicit := len(args) == 1
 		for _, alias := range aliases {
+			model, ok := cfg.Models[alias]
+			if !ok {
+				failed++
+				fmt.Printf("✗ %-12s model alias not found\n", alias)
+				continue
+			}
+			if !explicit && cfg.Providers[model.Provider].Type == config.ProviderCLI {
+				fmt.Printf("· %-12s (cli) — skipped; run %q to invoke it for real\n", alias, "agentic models test "+alias)
+				continue
+			}
 			start := time.Now()
 			err := probeModel(baseURL, token, alias)
 			if err != nil {
@@ -167,6 +183,9 @@ func probeModel(baseURL, token, alias string) error {
 	}
 	req.Header.Set("x-api-key", token)
 	req.Header.Set("content-type", "application/json")
+	if cwd, err := os.Getwd(); err == nil {
+		req.Header.Set("X-Agentic-Cwd", cwd)
+	}
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -183,12 +202,42 @@ func probeModel(baseURL, token, alias string) error {
 
 // ensureRouter joins the existing leader or runs one in-process for the
 // duration of the command.
+func portAvailable(port int) (bool, error) {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false, err
+	}
+	return true, ln.Close()
+}
+
+func freePort() (int, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	return port, ln.Close()
+}
+
 func ensureRouter(ctx context.Context, cfg *config.Config, dataDir string) (string, string, func(), error) {
 	token, err := launch.Token(dataDir)
 	if err != nil {
 		return "", "", nil, err
 	}
-	mgr := &router.Manager{Port: cfg.Router.Port, Token: token, DataDir: dataDir, Log: logger()}
+	port := cfg.Router.Port
+	// A router leader belongs to one agentic data directory/token. If another
+	// install (most commonly a test with a temporary HOME) already owns the
+	// configured port, pick another local port rather than joining it and
+	// sending that unrelated leader our token/config.
+	if discovery, err := router.ReadDiscovery(dataDir); err != nil || discovery.Port != port {
+		if available, err := portAvailable(port); err != nil || !available {
+			port, err = freePort()
+			if err != nil {
+				return "", "", nil, fmt.Errorf("selecting temporary router port: %w", err)
+			}
+		}
+	}
+	mgr := &router.Manager{Port: port, Token: token, DataDir: dataDir, Log: logger()}
 	runCtx, cancel := context.WithCancel(context.Background())
 	go mgr.Run(runCtx)
 	if err := mgr.Ensure(ctx); err != nil {
@@ -236,7 +285,7 @@ var modelsUpdatePricesCmd = &cobra.Command{
 
 func init() {
 	modelsAddCmd.Flags().StringVar(&modelProvider, "provider", "", "provider name from config")
-	modelsAddCmd.Flags().StringVar(&modelID, "id", "", "upstream model id")
+	modelsAddCmd.Flags().StringVar(&modelID, "id", "", "upstream model id (optional for cli providers)")
 	modelsAddCmd.Flags().StringVar(&modelReasoning, "reasoning", "", "none | effort | passive")
 	modelsAddCmd.Flags().IntVar(&modelMaxOutput, "max-output", 0, "clamp max_tokens to this output cap")
 	modelsAddCmd.Flags().IntVar(&modelCtxWindow, "context-window", 0, "model's real input context window in tokens")

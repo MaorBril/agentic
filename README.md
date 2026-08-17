@@ -2,7 +2,7 @@
 
 **Run Claude Code on any model, with a budget.**
 
-agentic wraps Claude Code in a thin local router. Your sessions look and feel exactly like `claude` — same TUI, same tools, same updates — but the model behind them can be Anthropic, OpenAI, xAI, or anything OpenAI-compatible (Ollama, vLLM, OpenRouter, DeepSeek, Groq). Every token is metered, priced, and checked against budgets you set.
+agentic wraps Claude Code in a thin local router. Your sessions look and feel exactly like `claude` — same TUI, same tools, same updates — but the model behind them can be Anthropic, OpenAI, xAI, or anything OpenAI-compatible (Ollama, vLLM, OpenRouter, DeepSeek, Groq). Whole tasks can also be delegated to a locally logged-in Codex or Grok CLI under your own subscription. Every routed API token is metered, priced, and checked against budgets you set.
 
 ```bash
 agentic                  # Claude Code, tracked, on your default profile
@@ -40,10 +40,11 @@ agentic (launcher) ──▶ claude (unmodified, auto-updating)
                    local router (127.0.0.1)
                    ├─ anthropic: byte-faithful passthrough
                    ├─ openai dialect: full request/stream translation
+                   ├─ cli: whole-task delegation to local Codex/Grok
                    ├─ usage log (SQLite) + pricing
                    └─ budget gate
                           ▼
-        Anthropic · OpenAI · xAI · Ollama · vLLM · OpenRouter · ...
+        Anthropic · OpenAI · xAI · Ollama · vLLM · OpenRouter · Codex CLI · Grok CLI · ...
 ```
 
 There is no daemon. The first `agentic` session binds the router port and serves everyone; when it exits, another running session takes over within a couple of seconds. The last session out turns off the lights.
@@ -70,6 +71,10 @@ agentic providers add openai --type openai --base-url https://api.openai.com/v1 
     --key-env OPENAI_API_KEY --max-tokens-param max_completion_tokens
 agentic models add gpt --provider openai --id gpt-5.2 --reasoning effort --max-output 16384
 agentic models test gpt          # 1-token probe: did I configure it right?
+
+agentic providers add codex --type cli --dialect codex --sandbox workspace-write
+agentic models add codex --provider codex   # subscription login; no API key
+
 agentic budget set --daily 25
 ```
 
@@ -84,6 +89,8 @@ profiles:
   local: {model: qwen, small_fast: qwen}
   subscription: {passthrough: true}   # plain claude, subscription billing, no tracking
 ```
+
+Aliases backed by a `cli` provider are subagent-only: they cannot be a profile model, `small_fast`, or tier.
 
 ## Dynamic routing
 
@@ -131,7 +138,7 @@ agentic routing set auto --classifier haiku \
 agentic routing list
 ```
 
-A recognized task mapping takes precedence over the selected tier. Unrecognized or unmatched work uses the tier normally. If the mapped model cannot hold the request, the router falls back to the smallest eligible capability tier. Pinned sessions (`pin_tiers` / `X-Agentic-Pin-Model`) bypass task and tier classification entirely. Task classification is a model-selection hint, not a security boundary; enforce sensitive-work policy separately.
+A recognized task mapping takes precedence over the selected tier. Unrecognized or unmatched work uses the tier normally. If the mapped model cannot hold the request, the router falls back to the smallest eligible capability tier. Pinned sessions (`pin_tiers` / `X-Agentic-Pin-Model`) bypass task and tier classification entirely. A `cli` alias cannot appear as a classifier, tier, or task mapping; validation rejects it so auto-routing can never silently start an independent agent run in your repository. Task classification is a model-selection hint, not a security boundary; enforce sensitive-work policy separately.
 
 Every decision is logged, and task choices appear in the existing reason field:
 
@@ -257,7 +264,7 @@ main · sonnet · sess $0.84 · day $4.31/$25 [██░░░░]
 
 Two things you should understand before routing through agentic:
 
-- **Billing.** Traffic through the router is billed to **API keys**, not your Claude Pro/Max subscription. OAuth credentials are never proxied. For subscription billing, use a `passthrough: true` profile — normal claude, no tracking.
+- **Billing.** Normal traffic through the router is billed to **API keys**, not your Claude Pro/Max subscription. OAuth credentials are never proxied. For Claude subscription billing, use a `passthrough: true` profile — normal claude, no tracking. [CLI delegation](#delegating-to-another-cli) instead bills the peer CLI's own subscription (ChatGPT or SuperGrok/X Premium+) through its cached local login, which agentic invokes but never reads. That spend happens outside the router, so delegated runs appear in `agentic cost` as $0 unpriced rows with estimated token counts and budgets cannot gate them.
 - **Fidelity.** Non-Anthropic models work through translation, but Claude Code's prompts and tool patterns are tuned for Claude, so expect them to be clunkier in the main loop. They shine as cheap workhorses for background tasks and subagents. Specific gaps: no prompt caching on OpenAI-dialect backends (provider-side implicit caching still shows up as cache reads), thinking blocks are display-only, Anthropic server tools (web search, code execution) are unavailable on translated models, `top_k` is dropped, stop sequences truncate to four, and token counting for translated models is a deliberate ~15% overestimate so auto-compact fires early instead of overflowing context. Set `max_output` on models whose output cap is below what Claude Code requests (it asks for 32K), and `context_window` on models whose window differs from the ~200K Claude Code assumes (see [Context scaling](#context-scaling)).
 
 ## Subagents on any model
@@ -272,6 +279,30 @@ agentic agents list     # what's implied by your config, and what's pending
 Every model you've configured becomes selectable by name — `subagent_type: "agentic-qwen"`, `"agentic-grok"`, `"agentic-gpt-5-6-sol"` — and its traffic routes, prices, and budgets like any other agentic request. The set is derived from your own `models:` map, so it's whatever *you* configured; nothing is hardcoded.
 
 When your aliases change, the next `agentic` launch offers to refresh them (once — decline and it stays quiet until the aliases change again; `AGENTIC_NO_AGENT_SYNC=1` opts out entirely). Only files prefixed `agentic-` are ever written or removed, so your own subagents are never touched.
+
+Aliases backed by a `cli` provider get a deliberately different description: the generated definition tells the orchestrator that it is handing the entire task to an independent agent with filesystem access, so it writes a self-contained prompt and expects minutes of latency instead of a completion.
+
+## Delegating to another CLI
+
+If you already pay for ChatGPT or SuperGrok, a `cli` provider can delegate a whole task to the vendor's official, locally installed coding CLI under your own login:
+
+```bash
+# Install the CLI first, then authenticate it directly:
+codex login                       # ChatGPT subscription
+# or: grok login                  # SuperGrok / X Premium+ subscription
+
+agentic providers add codex --type cli --dialect codex --sandbox workspace-write
+agentic models add codex --provider codex
+agentic agents sync               # writes ~/.claude/agents/agentic-codex.md
+```
+
+Invoking `subagent_type: "agentic-codex"` hands that task prompt verbatim to `codex exec` (or `grok -p`) in the session's working directory. The CLI authenticates itself from its own cached login; agentic neither extracts nor reuses its OAuth token. Set `--id` on the model alias only if you want to pass a specific model to the peer CLI. Use provider `--command` to override the binary and `--timeout-ms` to override the 20-minute default.
+
+This is a whole agent loop, not a model completion: expect minutes of latency, no incremental output, and real file modifications. The delegated CLI sees only the one task prompt — no conversation history, system prompt, or Claude Code tool definitions — so make it self-contained. Its final message becomes the subagent result. Failures return as final message text instead of retryable stream errors, because silently repeating a filesystem-mutating run would be unsafe.
+
+Delegation is deliberately explicit-only. A `cli` alias cannot be a profile model, `small_fast`, tier, auto classifier, or task mapping. Bulk `agentic models test` also skips CLI aliases; name one explicitly (`agentic models test codex`) only when you intend to launch a real delegation.
+
+For Codex, choose the blast radius with `--sandbox read-only`, `workspace-write`, or `danger-full-access`. Delegation requires an `agentic`-launched session so the router receives and validates its absolute working directory; a bare `claude` session is refused rather than running the CLI in the router leader's unrelated directory.
 
 ## Finding another session
 
@@ -311,8 +342,8 @@ Cross-instance messaging is native to Claude Code — sessions register under `~
 | `agentic context [session-id]` | context-fullness trajectory (true vs reported tokens) |
 | `agentic eval run/report` | paired model evaluation and artifact report |
 | `agentic agents list/sync` | subagent definitions for your model aliases |
-| `agentic models add/list/remove/test/update-prices` | model aliases |
-| `agentic providers add/list/remove` | upstream providers |
+| `agentic models add/list/remove/test/update-prices` | model aliases (`test` skips CLI aliases unless one is named explicitly) |
+| `agentic providers add/list/remove` | API providers and official CLI delegates (`--type cli`) |
 | `agentic profiles list/show` · `agentic budget set` | profiles and caps |
 | `agentic config get/set` | any config key |
 | `agentic router run/status` | headless router / who's leader |
@@ -323,9 +354,13 @@ Cross-instance messaging is native to Claude Code — sessions register under `~
 
 Provider keys are referenced by environment variable name. They resolve in order: process environment → `~/.agentic/env` (a `KEY=value` file, mode 0600, created by `setup`). Put keys in `~/.agentic/env` — the router reads it directly, so sessions work no matter which shell launched them, and the config file never holds a secret.
 
+`cli` providers have no agentic key: `providers list` shows `· (subscription login)`, and `base_url` / `api_key_env` are rejected. Authentication belongs entirely to the official CLI.
+
 ## Security notes
 
 The router binds `127.0.0.1` only and requires a per-install token (created by `setup`, mode 0600), so other local processes can't spend on your keys.
+
+CLI delegation starts a local subprocess with filesystem access in the launching session's working directory. The launcher carries that directory in `X-Agentic-Cwd`; the backend requires an absolute existing directory before spawning anything. Codex's `--sandbox` setting controls its write scope. Treat `danger-full-access` accordingly.
 
 ## License
 

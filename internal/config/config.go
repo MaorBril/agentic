@@ -13,6 +13,16 @@ import (
 const (
 	ProviderAnthropic = "anthropic"
 	ProviderOpenAI    = "openai"
+	// ProviderCLI delegates to a locally installed coding-agent CLI (Codex,
+	// Grok Build) running under the user's own subscription login, instead of
+	// an HTTP endpoint. agentic never touches the CLI's credentials — the
+	// binary authenticates itself from its own cached login.
+	ProviderCLI = "cli"
+
+	// CLI dialects — a closed set because the dialect determines argv shape,
+	// how the task text is passed, output extraction, and the login preflight.
+	CLIDialectCodex = "codex" // OpenAI Codex CLI: `codex exec`
+	CLIDialectGrok  = "grok"  // xAI Grok Build CLI: `grok -p`
 
 	DefaultPort = 41100
 )
@@ -76,7 +86,7 @@ type Router struct {
 }
 
 type Provider struct {
-	Type      string `yaml:"type"` // "anthropic" | "openai"
+	Type      string `yaml:"type"` // "anthropic" | "openai" | "cli"
 	BaseURL   string `yaml:"base_url"`
 	APIKeyEnv string `yaml:"api_key_env"`
 	APIKey    string `yaml:"api_key"`
@@ -89,6 +99,29 @@ type Provider struct {
 	// 0 means unknown/no cap. Sits on the provider because the cap belongs to
 	// the upstream edge, not the model.
 	MaxRequestBytes int `yaml:"max_request_bytes"`
+
+	// Dialect selects which coding-agent CLI a "cli" provider shells out to:
+	// CLIDialectCodex or CLIDialectGrok. cli providers only.
+	Dialect string `yaml:"dialect"`
+	// Command overrides the CLI binary name or path. Empty defaults to the
+	// dialect name ("codex"/"grok"). cli providers only.
+	Command string `yaml:"command"`
+	// Sandbox is passed through to Codex as --sandbox (read-only |
+	// workspace-write | danger-full-access). codex dialect only; empty keeps
+	// the CLI's own default.
+	Sandbox string `yaml:"sandbox"`
+	// TimeoutMS bounds a single delegated CLI run. 0 means the built-in
+	// default (20 minutes). cli providers only.
+	TimeoutMS int `yaml:"timeout_ms"`
+}
+
+// Bin returns the CLI binary to invoke for a cli provider: the configured
+// Command, else the dialect name.
+func (p Provider) Bin() string {
+	if p.Command != "" {
+		return p.Command
+	}
+	return p.Dialect
 }
 
 // Key resolves the provider's API key: config literal, then process
@@ -236,12 +269,41 @@ func (c *Config) Validate() error {
 	for name, p := range c.Providers {
 		switch p.Type {
 		case ProviderAnthropic, ProviderOpenAI:
+			if p.BaseURL == "" {
+				return fmt.Errorf("config: provider %q missing base_url", name)
+			}
+			// Catch cli-only fields here instead of silently ignoring them.
+			if p.Dialect != "" || p.Command != "" || p.Sandbox != "" || p.TimeoutMS != 0 {
+				return fmt.Errorf("config: provider %q: dialect/command/sandbox/timeout_ms only apply to cli providers — remove them", name)
+			}
+		case ProviderCLI:
+			switch p.Dialect {
+			case CLIDialectCodex, CLIDialectGrok:
+			default:
+				return fmt.Errorf("config: provider %q has unknown dialect %q (want %q or %q)",
+					name, p.Dialect, CLIDialectCodex, CLIDialectGrok)
+			}
+			// A cli provider has no HTTP upstream; these would be silently
+			// ignored, which is the failure mode this switch guards against.
+			if p.BaseURL != "" || p.APIKey != "" || p.APIKeyEnv != "" || p.MaxTokensParam != "" || p.MaxRequestBytes != 0 {
+				return fmt.Errorf("config: provider %q: base_url/api_key/api_key_env/max_tokens_param/max_request_bytes have no effect on cli providers — remove them", name)
+			}
+			if p.Sandbox != "" {
+				if p.Dialect != CLIDialectCodex {
+					return fmt.Errorf("config: provider %q: sandbox only applies to the %q dialect", name, CLIDialectCodex)
+				}
+				switch p.Sandbox {
+				case "read-only", "workspace-write", "danger-full-access":
+				default:
+					return fmt.Errorf("config: provider %q has unknown sandbox %q (want read-only, workspace-write, or danger-full-access)", name, p.Sandbox)
+				}
+			}
+			if p.TimeoutMS < 0 {
+				return fmt.Errorf("config: provider %q has negative timeout_ms", name)
+			}
 		default:
-			return fmt.Errorf("config: provider %q has unknown type %q (want %q or %q)",
-				name, p.Type, ProviderAnthropic, ProviderOpenAI)
-		}
-		if p.BaseURL == "" {
-			return fmt.Errorf("config: provider %q missing base_url", name)
+			return fmt.Errorf("config: provider %q has unknown type %q (want %q, %q, or %q)",
+				name, p.Type, ProviderAnthropic, ProviderOpenAI, ProviderCLI)
 		}
 		if p.MaxRequestBytes < 0 {
 			return fmt.Errorf("config: provider %q has negative max_request_bytes", name)
@@ -250,6 +312,15 @@ func (c *Config) Validate() error {
 	for alias, m := range c.Models {
 		if _, ok := c.Providers[m.Provider]; !ok {
 			return fmt.Errorf("config: model %q references unknown provider %q", alias, m.Provider)
+		}
+		if c.Providers[m.Provider].Type == ProviderCLI {
+			// A delegated CLI run is a whole agent loop, not a completion —
+			// none of the HTTP/completion knobs apply. ID stays optional and,
+			// when set, is passed as the CLI's model-selection flag.
+			if m.Reasoning != "" || m.MaxOutput != 0 || m.Pricing != nil || m.ContextWindow != 0 || m.EffectiveContext != 0 {
+				return fmt.Errorf("config: model %q: reasoning/max_output/pricing/context_window/effective_context have no effect on cli providers — remove them", alias)
+			}
+			continue
 		}
 		if m.ID == "" {
 			return fmt.Errorf("config: model %q missing id", alias)
@@ -283,10 +354,16 @@ func (c *Config) Validate() error {
 			if !c.isModelRef(alias) {
 				return fmt.Errorf("config: profile %q %s references unknown model alias %q", name, what, alias)
 			}
+			if c.IsCLIAlias(alias) {
+				return fmt.Errorf("config: profile %q %s references cli alias %q — cli delegation is only available as an explicit subagent (agentic agents sync), not a session model", name, what, alias)
+			}
 		}
 		for tier, alias := range prof.Tiers {
 			if !c.isModelRef(alias) {
 				return fmt.Errorf("config: profile %q tier %q references unknown model alias %q", name, tier, alias)
+			}
+			if c.IsCLIAlias(alias) {
+				return fmt.Errorf("config: profile %q tier %q references cli alias %q — cli delegation is only available as an explicit subagent, not a tier fallback", name, tier, alias)
 			}
 		}
 		if prof.PinTiers && prof.Model == "" {
@@ -305,12 +382,18 @@ func (c *Config) Validate() error {
 		if _, ok := c.Models[r.Classifier]; !ok {
 			return fmt.Errorf("config: routing %q classifier references unknown model alias %q", name, r.Classifier)
 		}
+		if c.IsCLIAlias(r.Classifier) {
+			return fmt.Errorf("config: routing %q classifier %q is a cli alias — classification needs a completion model, not a delegated agent", name, r.Classifier)
+		}
 		if len(r.Tiers) == 0 {
 			return fmt.Errorf("config: routing %q has no tiers", name)
 		}
 		for tier, alias := range r.Tiers {
 			if _, ok := c.Models[alias]; !ok {
 				return fmt.Errorf("config: routing %q tier %q references unknown model alias %q", name, tier, alias)
+			}
+			if c.IsCLIAlias(alias) {
+				return fmt.Errorf("config: routing %q tier %q references cli alias %q — auto-routing must never silently start a delegated agent run; invoke it as an explicit subagent instead", name, tier, alias)
 			}
 		}
 		if r.Default != "" {
@@ -326,6 +409,9 @@ func (c *Config) Validate() error {
 			if _, ok := c.Models[alias]; !ok {
 				return fmt.Errorf("config: routing %q task %q references unknown model alias %q", name, label, alias)
 			}
+			if c.IsCLIAlias(alias) {
+				return fmt.Errorf("config: routing %q task %q references cli alias %q — auto-routing must never silently start a delegated agent run; invoke it as an explicit subagent instead", name, label, alias)
+			}
 		}
 	}
 	return nil
@@ -340,6 +426,17 @@ func (c *Config) isModelRef(name string) bool {
 	}
 	_, ok := c.Routing[name]
 	return ok
+}
+
+// IsCLIAlias reports whether name is a model alias backed by a cli provider —
+// i.e. one that delegates a whole task to a local coding-agent CLI instead of
+// answering a single completion.
+func (c *Config) IsCLIAlias(name string) bool {
+	m, ok := c.Models[name]
+	if !ok {
+		return false
+	}
+	return c.Providers[m.Provider].Type == ProviderCLI
 }
 
 // Resolved is a model alias resolved to its provider.
