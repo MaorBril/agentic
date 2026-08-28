@@ -2,6 +2,7 @@ package openaibe
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -284,5 +285,48 @@ func TestResponseTranslationSanitizesToolCallID(t *testing.T) {
 	}
 	if out.Content[0].ID != "Bash_0" {
 		t.Errorf("tool_use.id = %q, want sanitized id without colon", out.Content[0].ID)
+	}
+}
+
+// OpenAI rejects messages[].tool_calls arrays longer than 128 ("array too
+// long"). Claude Code can still emit a single assistant turn with more
+// tool_use blocks than that; translateMessage must split it across several
+// assistant messages rather than send one oversized array.
+func TestAssistantMessageWithManyToolCallsIsSplit(t *testing.T) {
+	const n = 152
+	blocks := []anthropic.ContentBlock{{Type: "text", Text: "working"}}
+	for i := 0; i < n; i++ {
+		blocks = append(blocks, anthropic.ContentBlock{
+			Type: "tool_use", ID: fmt.Sprintf("toolu_%d", i), Name: "read_file",
+			Input: json.RawMessage(`{"path":"a.go"}`),
+		})
+	}
+	msgs, err := translateMessage(anthropic.Message{Role: "assistant", Content: blocks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("split messages = %d, want 2", len(msgs))
+	}
+	if len(msgs[0].ToolCalls) != maxToolCallsPerMessage {
+		t.Errorf("first chunk tool_calls = %d, want %d", len(msgs[0].ToolCalls), maxToolCallsPerMessage)
+	}
+	if len(msgs[1].ToolCalls) != n-maxToolCallsPerMessage {
+		t.Errorf("second chunk tool_calls = %d, want %d", len(msgs[1].ToolCalls), n-maxToolCallsPerMessage)
+	}
+	for _, m := range msgs {
+		if m.Role != "assistant" {
+			t.Errorf("chunk role = %q, want assistant", m.Role)
+		}
+	}
+	if msgs[0].Content != "working" {
+		t.Errorf("text should land on first chunk, got %v / %v", msgs[0].Content, msgs[1].Content)
+	}
+	if msgs[1].Content != nil {
+		t.Errorf("second chunk should carry no text, got %v", msgs[1].Content)
+	}
+	// order and ids preserved across the split
+	if msgs[0].ToolCalls[0].ID != "toolu_0" || msgs[1].ToolCalls[len(msgs[1].ToolCalls)-1].ID != fmt.Sprintf("toolu_%d", n-1) {
+		t.Errorf("tool_call ids out of order across split: %+v / %+v", msgs[0].ToolCalls[0], msgs[1].ToolCalls[len(msgs[1].ToolCalls)-1])
 	}
 }

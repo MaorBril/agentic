@@ -10,6 +10,13 @@ import (
 	"github.com/maorbril/agentic/internal/openai"
 )
 
+// maxToolCallsPerMessage is OpenAI's hard cap on messages[].tool_calls
+// length. Claude Code can emit a single assistant turn with more tool_use
+// blocks than that (e.g. after context compaction); translateMessage splits
+// the excess into extra assistant messages rather than sending an
+// oversized array.
+const maxToolCallsPerMessage = 128
+
 // TranslateRequest maps an Anthropic request onto a ChatRequest. Fidelity
 // gaps (documented in the README): cache_control stripped, server tools
 // dropped, thinking blocks not round-tripped, top_k dropped, stop
@@ -126,7 +133,7 @@ func translateMessage(msg anthropic.Message) ([]openai.ChatMessage, error) {
 		return []openai.ChatMessage{{Role: "system", Content: text}}, nil
 
 	case "assistant":
-		out := openai.ChatMessage{Role: "assistant"}
+		var toolCalls []openai.ToolCall
 		text := ""
 		for _, b := range msg.Content {
 			switch b.Type {
@@ -136,7 +143,7 @@ func translateMessage(msg anthropic.Message) ([]openai.ChatMessage, error) {
 				}
 				text += b.Text
 			case "tool_use":
-				out.ToolCalls = append(out.ToolCalls, openai.ToolCall{
+				toolCalls = append(toolCalls, openai.ToolCall{
 					ID:       b.ID,
 					Type:     "function",
 					Function: openai.FunctionCall{Name: b.Name, Arguments: string(b.Input)},
@@ -145,13 +152,31 @@ func translateMessage(msg anthropic.Message) ([]openai.ChatMessage, error) {
 				// Dropped on resend — no OpenAI slot, and DeepSeek requires omitting it.
 			}
 		}
-		if text != "" {
-			out.Content = text
-		}
-		if out.Content == nil && len(out.ToolCalls) == 0 {
+		if text == "" && len(toolCalls) == 0 {
 			return nil, nil
 		}
-		return []openai.ChatMessage{out}, nil
+		if len(toolCalls) <= maxToolCallsPerMessage {
+			out := openai.ChatMessage{Role: "assistant", ToolCalls: toolCalls}
+			if text != "" {
+				out.Content = text
+			}
+			return []openai.ChatMessage{out}, nil
+		}
+		// A single Anthropic turn can carry more tool_use blocks than
+		// OpenAI's hard cap on messages[].tool_calls (128); split the
+		// excess into additional assistant messages. The tool results for
+		// all of them still arrive in the next Anthropic message and land
+		// right after, so ordering holds.
+		var out []openai.ChatMessage
+		for i := 0; i < len(toolCalls); i += maxToolCallsPerMessage {
+			end := min(i+maxToolCallsPerMessage, len(toolCalls))
+			m := openai.ChatMessage{Role: "assistant", ToolCalls: toolCalls[i:end]}
+			if i == 0 && text != "" {
+				m.Content = text
+			}
+			out = append(out, m)
+		}
+		return out, nil
 
 	case "user":
 		var out []openai.ChatMessage
