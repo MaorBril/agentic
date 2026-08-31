@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -85,8 +86,46 @@ Defaults to the most recent session; find ids with 'agentic cost --by session'.`
 		}
 		fmt.Printf("\nassumed window %s: the client compacts against that; 'true' is what the model really held.\n",
 			humanTokens(tokens.AssumedWindow))
+		printComposition(st, sessionID)
+		printCalibration(st)
 		return nil
 	},
+}
+
+// printComposition shows where a session's context actually goes. The
+// system prompt and tool schemas are re-sent in full on every request, so
+// a high fixed share means most of the window is being spent before the
+// turn's own work is considered.
+func printComposition(st *store.Store, sessionID string) {
+	rows, err := st.Composition(sessionID, time.Time{})
+	if err != nil || len(rows) == 0 {
+		return
+	}
+	fmt.Printf("\nAverage request composition (estimated)\n")
+	fmt.Printf("%-24s %9s %9s %9s  %s\n", "model", "system", "tools", "messages", "fixed")
+	for _, r := range rows {
+		fmt.Printf("%-24s %9s %9s %9s  %3.0f%%\n", r.Model,
+			humanTokens(r.System), humanTokens(r.Tools), humanTokens(r.Messages),
+			r.FixedFraction()*100)
+	}
+}
+
+// printCalibration reports how close the router's own estimator runs to
+// real billed usage. Under 1.00 it over-counts, and every over-counted
+// token is context budget the router refuses to use.
+func printCalibration(st *store.Store) {
+	rows, err := st.EstimateCalibration(time.Now().AddDate(0, 0, -14))
+	if err != nil || len(rows) == 0 {
+		return
+	}
+	fmt.Printf("\nEstimator accuracy, last 14 days (true / estimated)\n")
+	for _, r := range rows {
+		note := ""
+		if r.Requests < tokens.MinSamples {
+			note = fmt.Sprintf("  (uncorrected: %d/%d samples)", r.Requests, tokens.MinSamples)
+		}
+		fmt.Printf("  %-24s ×%.2f  over %d requests%s\n", r.Model, r.Ratio(), r.Requests, note)
+	}
 }
 
 func init() {

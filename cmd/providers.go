@@ -12,15 +12,16 @@ import (
 )
 
 var (
-	provType    string
-	provBase    string
-	provKeyEnv  string
-	provMaxTok  string
-	provMaxReq  int64
-	provDialect string
-	provCommand string
-	provSandbox string
-	provTimeout int
+	provType     string
+	provBase     string
+	provKeyEnv   string
+	provMaxTok   string
+	provMaxReq   int64
+	provCacheKey bool
+	provDialect  string
+	provCommand  string
+	provSandbox  string
+	provTimeout  int
 )
 
 var providersCmd = &cobra.Command{
@@ -87,8 +88,8 @@ CLI running under your own subscription login (codex login / grok login):
 			if provDialect == "" {
 				return fmt.Errorf("--dialect is required for cli providers (%s | %s)", config.CLIDialectCodex, config.CLIDialectGrok)
 			}
-			if provBase != "" || provKeyEnv != "" || provMaxTok != "" || provMaxReq != 0 {
-				return fmt.Errorf("--base-url/--key-env/--max-tokens-param/--max-request-bytes do not apply to cli providers")
+			if provBase != "" || provKeyEnv != "" || provMaxTok != "" || provMaxReq != 0 || provCacheKey {
+				return fmt.Errorf("--base-url/--key-env/--max-tokens-param/--max-request-bytes/--prompt-cache-key do not apply to cli providers")
 			}
 			if provTimeout < 0 {
 				return fmt.Errorf("--timeout-ms must be >= 0")
@@ -121,6 +122,12 @@ CLI running under your own subscription login (codex login / grok login):
 		if provMaxReq > 0 {
 			snippet += fmt.Sprintf("max_request_bytes: %d\n", provMaxReq)
 		}
+		if provCacheKey {
+			if provType != config.ProviderOpenAI {
+				return fmt.Errorf("--prompt-cache-key applies to openai-dialect providers only")
+			}
+			snippet += "prompt_cache_key: true\n"
+		}
 		return editConfig(func(doc *config.Doc) error {
 			return doc.SetSubtree("providers", args[0], snippet)
 		}, "provider "+args[0])
@@ -144,6 +151,7 @@ func init() {
 	providersAddCmd.Flags().StringVar(&provKeyEnv, "key-env", "", "env var holding the API key (empty = no auth)")
 	providersAddCmd.Flags().StringVar(&provMaxTok, "max-tokens-param", "", "max_tokens | max_completion_tokens")
 	providersAddCmd.Flags().Int64Var(&provMaxReq, "max-request-bytes", 0, "upstream request body cap in bytes (refuses oversized requests pre-dispatch; 0 = none)")
+	providersAddCmd.Flags().BoolVar(&provCacheKey, "prompt-cache-key", false, "send a per-session prompt_cache_key for prefix-cache affinity (openai/xAI accept it; some strict OpenAI-compatible servers reject unknown fields)")
 	providersAddCmd.Flags().StringVar(&provDialect, "dialect", "", "cli providers: codex | grok")
 	providersAddCmd.Flags().StringVar(&provCommand, "command", "", "cli providers: binary name or path (default: the dialect name)")
 	providersAddCmd.Flags().StringVar(&provSandbox, "sandbox", "", "cli providers (codex only): read-only | workspace-write | danger-full-access")

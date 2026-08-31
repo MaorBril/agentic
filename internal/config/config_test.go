@@ -84,12 +84,6 @@ providers:
 models:
   m: {provider: local, id: foo, context_window: -1}
 `,
-		"context fields on anthropic provider (passthrough never scales)": `
-providers:
-  anthropic: {type: anthropic, base_url: https://api.anthropic.com}
-models:
-  m: {provider: anthropic, id: claude-sonnet-5, effective_context: 60000}
-`,
 		"pin_tiers without a model to pin to": `
 providers:
   anthropic: {type: anthropic, base_url: https://api.anthropic.com}
@@ -258,5 +252,24 @@ func TestSplitPathQuotedSegments(t *testing.T) {
 	got = splitPath("budgets.daily")
 	if len(got) != 2 || got[1] != "daily" {
 		t.Errorf("splitPath = %v", got)
+	}
+}
+
+// The Anthropic passthrough scales usage when a budget asks it to, so
+// context sizing on a Claude model is meaningful config, not a no-op:
+// effective_context forces compaction before the real window is full, and
+// context_window anchors the model in a routing rule's shared gauge.
+func TestAnthropicModelAcceptsContextSizing(t *testing.T) {
+	cfg, err := Parse([]byte(`
+providers:
+  anthropic: {type: anthropic, base_url: https://api.anthropic.com}
+models:
+  m: {provider: anthropic, id: claude-sonnet-5, context_window: 200000, effective_context: 60000}
+`))
+	if err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	if got := cfg.Models["m"].ContextBudget(); got != 60000 {
+		t.Errorf("ContextBudget() = %d, want 60000", got)
 	}
 }

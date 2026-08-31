@@ -53,7 +53,28 @@ type RouteRule struct {
 	// exact tier-only behavior: no combined task classification happens, and
 	// routing is byte-for-byte identical to a rule with no Tasks at all.
 	Tasks map[string]string `yaml:"tasks"`
+	// ContextGauge picks the budget the client's context gauge is scaled
+	// against for this rule (see internal/router/gauge.go):
+	//
+	//   "max"   (default) the largest budget the rule can route to. The
+	//           session keeps growing until the biggest tier is full;
+	//           turns that outgrow a smaller tier are remapped up to one
+	//           that fits by the existing size-aware routing.
+	//   "min"   the smallest budget. Every tier stays reachable at any
+	//           conversation length, at the cost of compacting as early
+	//           as the smallest window demands.
+	//   "model" legacy per-request scaling: the gauge tracks whichever
+	//           model served the last turn, and jumps when the tier
+	//           changes.
+	ContextGauge string `yaml:"context_gauge"`
 }
+
+// Context gauge policies for RouteRule.ContextGauge.
+const (
+	GaugeMax   = "max"
+	GaugeMin   = "min"
+	GaugeModel = "model"
+)
 
 // TaskLabels is the fixed, closed set of task labels a task-aware routing
 // rule may map. Fixed (not user-extensible) because the classifier prompt
@@ -99,6 +120,13 @@ type Provider struct {
 	// 0 means unknown/no cap. Sits on the provider because the cap belongs to
 	// the upstream edge, not the model.
 	MaxRequestBytes int `yaml:"max_request_bytes"`
+	// PromptCacheKey sends a per-session prompt_cache_key with every
+	// request so the upstream routes a session's turns to the same
+	// prefix cache instead of re-priming ~100K tokens of stable prefix
+	// on a cold machine. Opt-in: OpenAI and xAI accept the field, but a
+	// strict OpenAI-compatible server (some vLLM builds) rejects unknown
+	// body fields outright. openai providers only.
+	PromptCacheKey bool `yaml:"prompt_cache_key"`
 
 	// Dialect selects which coding-agent CLI a "cli" provider shells out to:
 	// CLIDialectCodex or CLIDialectGrok. cli providers only.
@@ -158,7 +186,10 @@ type Model struct {
 	// ContextWindow is the model's nominal input context window in tokens.
 	// Claude Code assumes ~200K; when the real window differs, the router
 	// scales reported token counts so auto-compact fires at the right
-	// relative fullness (see internal/tokens/scale.go).
+	// relative fullness (see internal/tokens/scale.go). Declaring it on an
+	// anthropic model is meaningful too: it anchors the model in a routing
+	// rule's shared context gauge, and lets effective_context force
+	// compaction before a real Claude window is full.
 	ContextWindow int `yaml:"context_window"`
 	// EffectiveContext caps the usable context below the nominal window —
 	// an attention budget for models that degrade well before their
@@ -337,11 +368,6 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: model %q effective_context %d exceeds context_window %d",
 				alias, m.EffectiveContext, m.ContextWindow)
 		}
-		// The anthropic backend is a byte-faithful passthrough — it never
-		// scales token counts, so these fields would be silently ignored.
-		if c.Providers[m.Provider].Type == ProviderAnthropic && m.ContextBudget() > 0 {
-			return fmt.Errorf("config: model %q: context_window/effective_context have no effect on anthropic providers (passthrough never scales) — remove them", alias)
-		}
 	}
 	for name, prof := range c.Profiles {
 		for what, alias := range map[string]string{"model": prof.Model, "small_fast": prof.SmallFast} {
@@ -399,6 +425,12 @@ func (c *Config) Validate() error {
 			if c.IsCLIAlias(alias) {
 				return fmt.Errorf("config: routing %q tier %q references cli alias %q — auto-routing must never silently start a delegated agent run; invoke it as an explicit subagent instead", name, tier, alias)
 			}
+		}
+		switch r.ContextGauge {
+		case "", GaugeMax, GaugeMin, GaugeModel:
+		default:
+			return fmt.Errorf("config: routing %q has unknown context_gauge %q (want %q, %q, or %q)",
+				name, r.ContextGauge, GaugeMax, GaugeMin, GaugeModel)
 		}
 		if r.Default != "" {
 			if _, ok := r.Tiers[r.Default]; !ok {

@@ -19,6 +19,10 @@ type ChatRequest struct {
 	ParallelToolCalls   *bool          `json:"parallel_tool_calls,omitempty"`
 	ReasoningEffort     string         `json:"reasoning_effort,omitempty"`
 	User                string         `json:"user,omitempty"`
+	// PromptCacheKey routes requests that share a prefix to the same
+	// cache. Only sent when the provider declares support: strict
+	// OpenAI-compatible servers reject unknown body fields.
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 }
 
 type StreamOptions struct {

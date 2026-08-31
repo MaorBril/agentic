@@ -53,17 +53,59 @@ Rules of the lie:
   of the token estimator: compacting early is harmless, blowing the real
   window is fatal.
 - **Unset means untouched.** Models without `context_window` /
-  `effective_context` get factor 1. The Anthropic passthrough backend is
-  byte-faithful and never scales (a Claude model's real window matches the
-  client's assumption; `effective_context` on an anthropic-provider model
-  currently has no effect — set it on translated models only).
+  `effective_context` get factor 1, and an unset budget is treated as
+  *equal to* the assumed window wherever budgets are compared.
+- **The Anthropic passthrough is byte-faithful until a budget asks
+  otherwise.** At factor 1 — the common case — it forwards every byte
+  unchanged, cache_control and signed thinking blocks included. When a
+  factor applies (an `effective_context` on a Claude model, or a routing
+  rule whose shared gauge is anchored somewhere other than 200K), it
+  rewrites the three input-side usage counters in `message_start` and in
+  non-streaming responses, through a generic decode so neighbouring
+  fields round-trip as written. A payload it cannot parse is forwarded
+  unchanged: stale numbers beat an unreadable response.
 
 ## Interaction with dynamic routing
 
 With `model: auto`, different turns land on models with different budgets.
-The gauge is always relative to the *current* model, so it can jump when
-the tier changes — a conversation at 30% of opus's budget may be 90% of a
-local model's. That jump is correct (it reflects real headroom).
+
+**One anchor per rule.** Scaling against whichever model served the last
+turn makes the gauge mean something different every turn: the same
+conversation is 30% of a 1M model and 95% of a 200K one. Claude Code
+compacts on the last reported number, so a single light-tier turn
+triggers a compaction the big model never needed — the effective window
+of the whole session collapses to the smallest tier it happens to touch.
+
+So the gauge is anchored to one budget for the rule, chosen by
+`context_gauge`:
+
+```yaml
+routing:
+  auto:
+    classifier: haiku
+    context_gauge: max      # default; also: min, model
+    tiers: {deep: opus, standard: sonnet, light: qwen}
+```
+
+- `max` (default) — the largest budget the rule can route to, tier and
+  task targets alike. The session grows until the biggest tier is full;
+  turns that outgrow a smaller tier are filtered out of it and remapped
+  up by the size-aware routing below, which is machinery that already
+  exists. **The trade-off:** past a smaller tier's window, that tier
+  stops being eligible, so a long session concentrates on the big model.
+  That is the intended exchange — usable window for tier mix — but it is
+  a real cost change on a rule that mixes a 200K tier with a 1M one.
+- `min` — the smallest budget. Every tier stays reachable at any
+  conversation length, at the cost of compacting as early as the
+  smallest window demands.
+- `model` — the original per-request behavior, gauge jumps included.
+
+An undeclared window counts as the assumed 200K in this comparison
+rather than being skipped, so an all-Anthropic rule anchors at 200K and
+scales by exactly 1, exactly as before.
+
+The usage log records both numbers: `ctx_budget` is the serving model's
+own window, `gauge_budget` what the client was scaled against.
 
 **Size-aware tier selection.** Before classifying, the router estimates the
 request's input size and filters out any tier whose budget can't hold input
@@ -115,6 +157,72 @@ provider's cap with a `400 invalid_request_error` ("request body too large … r
 /compact or remove images/attachments") instead of a mangled upstream 413 retry
 loop. Unknown cap (`0`) means no guard. `agentic providers add --max-request-bytes`
 sets it.
+
+## Calibrating the estimator
+
+`count_tokens` for translated models is a 3.5-chars-per-token heuristic
+plus a 10% margin, and measured against real tokenizers it runs 15-25%
+high. The bias is deliberate — compacting early is harmless, overflowing
+is fatal — but it is not free: the over-count is subtracted from every
+budget the router checks, so on a 1M-token model it can strand six
+figures of usable window and force needless tier remaps.
+
+Every request now records its own raw estimate alongside what upstream
+billed (`est_input`, `est_system`, `est_tools` in `usage_events`). From
+that history the router derives a correction per upstream model — the
+ratio of summed true input to summed estimate over successful requests in
+the last 14 days — and multiplies the raw estimate by it before any
+budget comparison.
+
+Guards, because this feeds itself:
+
+- **Only raw estimates are stored.** Recording the corrected number would
+  feed the correction back into its own measurement.
+- **20 requests minimum** before a model's ratio is trusted; below that
+  the raw estimate stands.
+- **Clamped to [0.6, 1.5]**, and the clamp is asymmetric on purpose:
+  correcting *upward* restores the safety bias, correcting downward
+  spends it, so the floor is tighter than the ceiling.
+- **Ratio of sums, not mean of ratios** — a handful of tiny requests
+  should not outvote the large ones, and it is the large requests whose
+  fit against a budget actually matters.
+
+`agentic context` prints the measured accuracy per model. A ratio of 0.80
+means the estimator over-counts by 25% and a fifth of every budget check
+was going to a number that was never there.
+
+## Where the context actually goes
+
+The same per-request record splits the estimate three ways — system
+prompt, tool schemas, conversation — because the first two are re-sent in
+full on every request whatever the turn is about. `agentic context` shows
+the average split and the fixed share; a session where tool schemas are
+40% of every request is one where trimming MCP servers buys more than any
+amount of routing cleverness.
+
+## Not paying for the same prefix twice
+
+Two behaviors protect the upstream prefix cache, which is where the
+input-token bill actually gets decided:
+
+- **`prompt_cache_key`.** OpenAI-dialect caching is automatic and
+  prefix-based, but needs an affinity hint to send a session's turns back
+  to the machine holding its prefix. Providers opt in with
+  `prompt_cache_key: true` (or `agentic providers add
+  --prompt-cache-key`) and the router sends the session id. Opt-in
+  because a strict OpenAI-compatible server rejects unknown body fields
+  outright. `agentic cost` reports the resulting hit rate.
+- **Tier-flap control.** A classifier that alternates deep/light/deep
+  abandons a warm cache on each switch and re-primes the whole prefix at
+  full input price. A downshift is allowed outright when the prefix is
+  short (under ~80KB of request body, so re-priming is cheap) or the
+  previous decision is older than the ~5-minute upstream cache TTL, when
+  there is nothing left to lose. Otherwise it must be asked for on two
+  consecutive turns — a debounce, not a freeze: an alternating classifier
+  never accumulates two cheap votes in a row, while a session that has
+  genuinely moved to lighter work moves after one held turn. Escalation
+  is never suppressed. Holds appear in the routing reason as
+  `flap:light→deep`.
 
 ## Evaluating it
 
@@ -174,7 +282,6 @@ GROUP BY model, decile ORDER BY model, decile;
 
 ## Known limitations
 
-- The gauge jump on tier switches (above).
 - **Auto-compact only engages for model ids Claude Code recognizes.**
   Measured live (Claude Code 2.x, July 2026): with an unknown alias name
   in `ANTHROPIC_MODEL` (`glm`, `qwen`), the client applies *no* context
@@ -204,9 +311,11 @@ GROUP BY model, decile ORDER BY model, decile;
 - `count_tokens` for translated models is an estimate (~3.5 chars/token,
   +10% margin), not a tokenizer. Scaling preserves the bias but also
   scales the estimation error; on very small budgets (≤8K) the margin can
-  cost a few hundred usable tokens.
-- Anthropic passthrough models are never scaled, so `effective_context`
-  can't yet force early compaction on a real Claude model.
+  cost a few hundred usable tokens. Calibration (above) narrows this once
+  a model has history, but never replaces a real tokenizer.
+- The `max` anchor concentrates long sessions on the largest tier, since
+  smaller tiers stop being eligible once the conversation outgrows them.
+  `context_gauge: min` trades window for tier mix.
 - Claude Code's compact threshold (~92%) is its own moving target; the
   scaling is threshold-agnostic (pure proportionality), so threshold
   changes upstream don't break correctness, only the eval's simulated

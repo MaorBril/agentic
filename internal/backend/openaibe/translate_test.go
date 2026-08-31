@@ -53,7 +53,7 @@ func TestRequestTranslation(t *testing.T) {
 	    ]}
 	  ]
 	}`
-	out, err := TranslateRequest(parseReq(t, body), route("", "none"))
+	out, err := TranslateRequest(parseReq(t, body), route("", "none"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestMidConversationSystemMessage(t *testing.T) {
 	  {"role":"user","content":"hi"},
 	  {"role":"system","content":"Terse mode enabled."}
 	]}`
-	out, err := TranslateRequest(parseReq(t, body), route("", ""))
+	out, err := TranslateRequest(parseReq(t, body), route("", ""), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestReasoningModes(t *testing.T) {
 	  "messages":[{"role":"user","content":"hi"}]}`
 
 	// effort: budget → reasoning_effort, sampling params dropped
-	out, _ := TranslateRequest(parseReq(t, body), route("max_completion_tokens", "effort"))
+	out, _ := TranslateRequest(parseReq(t, body), route("max_completion_tokens", "effort"), "")
 	if out.ReasoningEffort != "high" {
 		t.Errorf("reasoning_effort = %q", out.ReasoningEffort)
 	}
@@ -143,7 +143,7 @@ func TestReasoningModes(t *testing.T) {
 	}
 
 	// passive: thinking stripped, sampling kept
-	out, _ = TranslateRequest(parseReq(t, body), route("", "passive"))
+	out, _ = TranslateRequest(parseReq(t, body), route("", "passive"), "")
 	if out.ReasoningEffort != "" {
 		t.Error("passive must not set reasoning_effort")
 	}
@@ -153,7 +153,7 @@ func TestReasoningModes(t *testing.T) {
 
 	// none: reasoning_effort explicitly "none" (GPT-5-class models reject
 	// function tools otherwise), sampling kept
-	out, _ = TranslateRequest(parseReq(t, body), route("", "none"))
+	out, _ = TranslateRequest(parseReq(t, body), route("", "none"), "")
 	if out.ReasoningEffort != "none" {
 		t.Errorf("none must explicitly set reasoning_effort=\"none\", got %q", out.ReasoningEffort)
 	}
@@ -168,7 +168,7 @@ func TestImageTranslation(t *testing.T) {
 	    {"type":"text","text":"what is this"},
 	    {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}
 	  ]}]}`
-	out, _ := TranslateRequest(parseReq(t, body), route("", ""))
+	out, _ := TranslateRequest(parseReq(t, body), route("", ""), "")
 	parts, ok := out.Messages[0].Content.([]openai.ContentPart)
 	if !ok || len(parts) != 2 {
 		t.Fatalf("content: %+v", out.Messages[0].Content)
@@ -328,5 +328,36 @@ func TestAssistantMessageWithManyToolCallsIsSplit(t *testing.T) {
 	// order and ids preserved across the split
 	if msgs[0].ToolCalls[0].ID != "toolu_0" || msgs[1].ToolCalls[len(msgs[1].ToolCalls)-1].ID != fmt.Sprintf("toolu_%d", n-1) {
 		t.Errorf("tool_call ids out of order across split: %+v / %+v", msgs[0].ToolCalls[0], msgs[1].ToolCalls[len(msgs[1].ToolCalls)-1])
+	}
+}
+
+// Anthropic cache_control breakpoints have no OpenAI equivalent, but
+// upstream prefix caching still needs an affinity hint to route a
+// session's turns back to the machine holding its prefix. Opt-in, because
+// a strict OpenAI-compatible server rejects unknown body fields.
+func TestPromptCacheKey(t *testing.T) {
+	req := parseReq(t, `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
+
+	out, err := TranslateRequest(req, route("", "none"), "sess-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.PromptCacheKey != "sess-abc" {
+		t.Errorf("PromptCacheKey = %q, want sess-abc", out.PromptCacheKey)
+	}
+
+	out, err = TranslateRequest(req, route("", "none"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.PromptCacheKey != "" {
+		t.Errorf("PromptCacheKey = %q, want empty", out.PromptCacheKey)
+	}
+	body, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "prompt_cache_key") {
+		t.Errorf("empty cache key must not reach the wire: %s", body)
 	}
 }

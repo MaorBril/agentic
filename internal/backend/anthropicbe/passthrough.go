@@ -14,6 +14,7 @@ import (
 
 	"github.com/maorbril/agentic/internal/anthropic"
 	"github.com/maorbril/agentic/internal/backend"
+	"github.com/maorbril/agentic/internal/tokens"
 )
 
 type Backend struct {
@@ -100,9 +101,12 @@ func (b *Backend) forward(ctx context.Context, call *backend.Call, w http.Respon
 		return res
 	}
 
+	// Usually 1 — see scale.go for the two cases that turn scaling on.
+	factor := tokens.ScaleFactor(call.ScaleBudget())
+
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-		res.Usage = copySSEWithUsageTee(resp.Body, w)
-		res.ReportedInput = res.Usage.InputSide() // passthrough never scales
+		res.Usage = copySSEWithUsageTee(resp.Body, w, factor)
+		res.ReportedInput = tokens.ScaleUsage(res.Usage, factor).InputSide()
 		return res
 	}
 
@@ -113,29 +117,36 @@ func (b *Backend) forward(ctx context.Context, call *backend.Call, w http.Respon
 		}
 		json.Unmarshal(buf, &parsed)
 		res.Usage = parsed.Usage
-		res.ReportedInput = res.Usage.InputSide()
+		res.ReportedInput = tokens.ScaleUsage(res.Usage, factor).InputSide()
+		buf = scaleResponseBody(buf, factor)
 	}
 	w.Write(buf)
 	return res
 }
 
-// copySSEWithUsageTee streams the SSE body through untouched while watching
-// data: lines for message_start (input + cache tokens) and message_delta
-// (output tokens). Flushes after every line so streaming stays live.
-func copySSEWithUsageTee(r io.Reader, w http.ResponseWriter) anthropic.Usage {
+// copySSEWithUsageTee streams the SSE body through while watching data:
+// lines for message_start (input + cache tokens) and message_delta
+// (output tokens). Flushes after every line so streaming stays live. The
+// usage returned is always TRUE upstream usage; factor rewrites only what
+// the client sees, and at factor 1 (the common case) every line is
+// forwarded byte-for-byte.
+func copySSEWithUsageTee(r io.Reader, w http.ResponseWriter, factor float64) anthropic.Usage {
 	var usage anthropic.Usage
 	flusher, _ := w.(http.Flusher)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		if data, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
+			scanUsage(data, &usage)
+			if scaled := scaleSSEData(data, factor); !bytes.Equal(scaled, data) {
+				line = append([]byte("data: "), scaled...)
+			}
+		}
 		w.Write(line)
 		w.Write([]byte("\n"))
 		if flusher != nil {
 			flusher.Flush()
-		}
-		if data, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
-			scanUsage(data, &usage)
 		}
 	}
 	return usage
