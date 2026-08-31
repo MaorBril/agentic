@@ -76,43 +76,35 @@ func TestGaugeBudgetUndeclaredWindow(t *testing.T) {
 	}
 }
 
-// The hazard the max anchor creates: it lets a conversation grow past
-// what an unsized (undeclared, i.e. ~200K) tier can hold, so that tier
-// must be held to the assumed window rather than treated as infinite —
-// otherwise every oversized turn is handed to the model least able to
-// take it, and fails upstream instead of remapping away.
-func TestUnsizedTierIsBoundedUnderHighAnchor(t *testing.T) {
+// Anchoring the gauge high does not change what an undeclared window
+// means: unsized stays unconstrained. Guessing that an undeclared model
+// is a 200K one would be wrong for exactly the models most likely to be
+// left unsized — a Claude 5 tier holds far more than that. A model whose
+// window really is small says so with context_window, which is now
+// accepted on anthropic providers too.
+func TestUnsizedTiersStayUnconstrainedUnderAnyAnchor(t *testing.T) {
 	cfg := gaugeCfg(t)
-	rule := config.RouteRule{
-		Classifier: "small",
-		Tiers:      map[string]string{"deep": "big", "standard": "opus"}, // opus declares no window
+	mixed := config.RouteRule{Tiers: map[string]string{"deep": "big", "standard": "opus"}}
+	if got := gaugeBudget(cfg, mixed); got != 1_000_000 {
+		t.Fatalf("anchor = %d, want the 1M tier", got)
 	}
-	// ~300K estimated tokens: fits the 1M tier, not a 200K one.
-	huge := reqWith(repeat("word ", 220_000))
-	fit := classifyTierFit(cfg, rule, huge, 0, nil)
-
+	fit := classifyTierFit(cfg, mixed, reqWith(repeat("word ", 220_000)), 0, nil)
 	if fit.EstInput < 250_000 {
 		t.Fatalf("test request too small to exercise the case: est=%d", fit.EstInput)
 	}
-	if fit.Eligible["standard"] {
-		t.Error("unsized 200K tier still eligible for a 300K request under a 1M anchor")
+	if !fit.Eligible["standard"] {
+		t.Error("an unsized tier must stay eligible; declare context_window to bound it")
 	}
-	if !fit.Eligible["deep"] {
-		t.Error("the 1M tier should hold it")
-	}
-	if got := remapTier(cfg, rule, fit, "standard"); got != "deep" {
-		t.Errorf("remapTier = %q, want deep", got)
-	}
-}
 
-// An all-Anthropic rule anchors at 200K, which is not above the assumed
-// window, so nothing changes: unsized stays infinite and no tier is ever
-// filtered for size. This is the backward-compatibility guarantee.
-func TestUnsizedTiersStayInfiniteWithoutHighAnchor(t *testing.T) {
-	cfg := gaugeCfg(t)
-	rule := config.RouteRule{Tiers: map[string]string{"deep": "opus", "standard": "opus"}}
-	fit := classifyTierFit(cfg, rule, reqWith(repeat("word ", 220_000)), 0, nil)
-	if fit.Required != 0 || len(fit.Filtered) != 0 {
-		t.Errorf("all-anthropic rule started filtering: required=%d filtered=%v", fit.Required, fit.Filtered)
+	// Declaring the window is what bounds it.
+	sized := cfg.Models["opus"]
+	sized.ContextWindow = 200_000
+	cfg.Models["opus"] = sized
+	fit = classifyTierFit(cfg, mixed, reqWith(repeat("word ", 220_000)), 0, nil)
+	if fit.Eligible["standard"] {
+		t.Error("a declared 200K tier should be filtered out of a 300K request")
+	}
+	if got := remapTier(cfg, mixed, fit, "standard"); got != "deep" {
+		t.Errorf("remapTier = %q, want deep", got)
 	}
 }

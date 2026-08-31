@@ -44,15 +44,6 @@ func (c *Call) ScaleBudget() int {
 	return c.Route.Model.ContextBudget()
 }
 
-// PromptCacheKey returns the per-session cache key to send upstream, or
-// "" when the provider has not opted in or the session is unattributed.
-func (c *Call) PromptCacheKey() string {
-	if !c.Route.Provider.PromptCacheKey {
-		return ""
-	}
-	return c.Header.Get("X-Agentic-Session")
-}
-
 // EstimateInput returns the calibrated input estimate for a parsed
 // request under this call's model.
 func (c *Call) EstimateInput(req *anthropic.MessagesRequest) int64 {

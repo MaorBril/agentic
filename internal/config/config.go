@@ -120,13 +120,6 @@ type Provider struct {
 	// 0 means unknown/no cap. Sits on the provider because the cap belongs to
 	// the upstream edge, not the model.
 	MaxRequestBytes int `yaml:"max_request_bytes"`
-	// PromptCacheKey sends a per-session prompt_cache_key with every
-	// request so the upstream routes a session's turns to the same
-	// prefix cache instead of re-priming ~100K tokens of stable prefix
-	// on a cold machine. Opt-in: OpenAI and xAI accept the field, but a
-	// strict OpenAI-compatible server (some vLLM builds) rejects unknown
-	// body fields outright. openai providers only.
-	PromptCacheKey bool `yaml:"prompt_cache_key"`
 
 	// Dialect selects which coding-agent CLI a "cli" provider shells out to:
 	// CLIDialectCodex or CLIDialectGrok. cli providers only.

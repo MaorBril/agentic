@@ -200,29 +200,15 @@ the average split and the fixed share; a session where tool schemas are
 40% of every request is one where trimming MCP servers buys more than any
 amount of routing cleverness.
 
-## Not paying for the same prefix twice
+## Watching the prefix cache
 
-Two behaviors protect the upstream prefix cache, which is where the
-input-token bill actually gets decided:
-
-- **`prompt_cache_key`.** OpenAI-dialect caching is automatic and
-  prefix-based, but needs an affinity hint to send a session's turns back
-  to the machine holding its prefix. Providers opt in with
-  `prompt_cache_key: true` (or `agentic providers add
-  --prompt-cache-key`) and the router sends the session id. Opt-in
-  because a strict OpenAI-compatible server rejects unknown body fields
-  outright. `agentic cost` reports the resulting hit rate.
-- **Tier-flap control.** A classifier that alternates deep/light/deep
-  abandons a warm cache on each switch and re-primes the whole prefix at
-  full input price. A downshift is allowed outright when the prefix is
-  short (under ~80KB of request body, so re-priming is cheap) or the
-  previous decision is older than the ~5-minute upstream cache TTL, when
-  there is nothing left to lose. Otherwise it must be asked for on two
-  consecutive turns — a debounce, not a freeze: an alternating classifier
-  never accumulates two cheap votes in a row, while a session that has
-  genuinely moved to lighter work moves after one held turn. Escalation
-  is never suppressed. Holds appear in the routing reason as
-  `flap:light→deep`.
+Prompt caching decides most of the input bill, so `agentic cost` reports
+the share of each model's input tokens that upstream served from cache.
+Translated backends get no `cache_control` breakpoints — that is an
+Anthropic-API concept — but provider-side implicit caching is prefix-based
+and shows up here as cache reads. Check this number before reaching for
+anything cleverer: on a healthy setup it sits in the high eighties or
+nineties, and there is simply no headroom to reclaim.
 
 ## Evaluating it
 

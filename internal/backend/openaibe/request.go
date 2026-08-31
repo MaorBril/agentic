@@ -21,17 +21,10 @@ const maxToolCallsPerMessage = 128
 // gaps (documented in the README): cache_control stripped, server tools
 // dropped, thinking blocks not round-tripped, top_k dropped, stop
 // sequences truncated to 4.
-//
-// cacheKey, when non-empty, is sent as prompt_cache_key. The Anthropic
-// cache_control breakpoints have no OpenAI equivalent — upstream caching
-// there is automatic and prefix-based — but it still needs an affinity
-// hint to send a session's turns back to the machine holding its prefix.
-// Empty for providers that have not opted in.
-func TranslateRequest(req *anthropic.MessagesRequest, route config.Resolved, cacheKey string) (*openai.ChatRequest, error) {
+func TranslateRequest(req *anthropic.MessagesRequest, route config.Resolved) (*openai.ChatRequest, error) {
 	out := &openai.ChatRequest{
-		Model:          route.Model.ID,
-		Stream:         req.Stream,
-		PromptCacheKey: cacheKey,
+		Model:  route.Model.ID,
+		Stream: req.Stream,
 	}
 	if req.Stream {
 		out.StreamOptions = &openai.StreamOptions{IncludeUsage: true}

@@ -31,9 +31,10 @@ func reservedOutput(reqMaxTokens, modelMaxOutput int) int {
 	return r
 }
 
-// tierBudget resolves the declared context budget for a tier's model
-// alias. Returns 0 when the budget is undeclared or the alias fails to
-// resolve (defensive — config validation should prevent that).
+// tierBudget resolves the context budget for a tier's model alias. Returns 0
+// when the budget is unknown (the tier is then treated as having infinite
+// capacity) or the alias fails to resolve (defensive — config validation
+// should prevent that).
 func tierBudget(cfg *config.Config, alias string) int {
 	if cfg == nil {
 		return 0
@@ -43,21 +44,6 @@ func tierBudget(cfg *config.Config, alias string) int {
 		return 0
 	}
 	return r.Model.ContextBudget()
-}
-
-// budgetFor is the budget to hold an alias to, applying the rule's
-// treatment of models that declare no window. assumeUnsized == 0 keeps the
-// historical reading — undeclared means infinite, always eligible — which
-// is what an all-Anthropic rule wants. It is set to the assumed window
-// when the rule's gauge is anchored above 200K: the conversation is then
-// allowed to grow past what an undeclared (i.e. ~200K) model can hold, so
-// leaving those tiers "infinite" would send them turns that overflow
-// upstream instead of remapping away.
-func budgetFor(cfg *config.Config, alias string, assumeUnsized int) int {
-	if b := tierBudget(cfg, alias); b > 0 {
-		return b
-	}
-	return assumeUnsized
 }
 
 // tierMaxRequestBytes resolves the request-body byte cap for a tier's provider.
@@ -75,16 +61,12 @@ func tierMaxRequestBytes(cfg *config.Config, alias string) int {
 
 // fitDecision summarizes the size-aware filtering of a route rule's tiers.
 type fitDecision struct {
-	Eligible  map[string]bool // tier name -> fits (an unconstrained tier => true)
+	Eligible  map[string]bool // tier name -> fits (budget/bytes unknown => true)
 	Required  int64           // uncalibrated estimate + reserved output; 0 when sizing is inactive
 	EstInput  int64           // the raw estimate, or 0 when no tier had a known budget
 	Reserved  int64           // output headroom, shared by every tier
 	BodyBytes int64           // raw request body size, for byte-cap filtering
 	Filtered  []string        // tiers excluded because they don't fit (sorted)
-
-	// assumeUnsized is the budget attributed to a tier that declares no
-	// window; 0 means "infinite". See budgetFor.
-	assumeUnsized int
 
 	// calib corrects EstInput per model before it is compared to a
 	// budget. Held here rather than applied up front because the
@@ -111,7 +93,7 @@ func (f fitDecision) requiredFor(cfg *config.Config, alias string) int64 {
 // target — anything resolvable via config) can hold this request,
 // considering only limits that are actually known (0/unset never filters).
 func (f fitDecision) aliasFits(cfg *config.Config, alias string) bool {
-	if b := budgetFor(cfg, alias, f.assumeUnsized); b > 0 && f.requiredFor(cfg, alias) > int64(b) {
+	if b := tierBudget(cfg, alias); b > 0 && f.requiredFor(cfg, alias) > int64(b) {
 		return false
 	}
 	if mb := tierMaxRequestBytes(cfg, alias); mb > 0 && f.BodyBytes > int64(mb) {
@@ -134,10 +116,6 @@ func (f fitDecision) aliasFits(cfg *config.Config, alias string) bool {
 // estimate to check against instead of always reading as "unknown budget,
 // always eligible".
 func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.MessagesRequest, bodyBytes int64, calib tokens.Calibration) fitDecision {
-	assumeUnsized := 0
-	if gaugeBudget(cfg, rule) > tokens.AssumedWindow {
-		assumeUnsized = tokens.AssumedWindow
-	}
 	elig := map[string]bool{}
 	for t := range rule.Tiers {
 		elig[t] = true
@@ -160,7 +138,7 @@ func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.M
 		checkAlias(alias)
 	}
 	if !anyTokenKnown && !anyByteKnown {
-		return fitDecision{Eligible: elig, BodyBytes: bodyBytes, calib: calib, assumeUnsized: assumeUnsized}
+		return fitDecision{Eligible: elig, BodyBytes: bodyBytes, calib: calib}
 	}
 
 	est := tokens.Estimate(req)
@@ -182,13 +160,12 @@ func classifyTierFit(cfg *config.Config, rule config.RouteRule, req *anthropic.M
 	}
 	reserved := int64(reservedOutput(reqMax, maxCap))
 	fit := fitDecision{
-		Eligible:      elig,
-		Required:      est + reserved,
-		EstInput:      est,
-		Reserved:      reserved,
-		BodyBytes:     bodyBytes,
-		calib:         calib,
-		assumeUnsized: assumeUnsized,
+		Eligible:  elig,
+		Required:  est + reserved,
+		EstInput:  est,
+		Reserved:  reserved,
+		BodyBytes: bodyBytes,
+		calib:     calib,
 	}
 
 	var filtered []string
@@ -244,7 +221,7 @@ func remapTier(cfg *config.Config, rule config.RouteRule, fit fitDecision, chose
 		if !fit.Eligible[tier] {
 			continue
 		}
-		b := budgetFor(cfg, rule.Tiers[tier], fit.assumeUnsized)
+		b := tierBudget(cfg, rule.Tiers[tier])
 		if b > 0 {
 			known = append(known, cand{tier, b})
 		} else {
@@ -264,7 +241,7 @@ func remapTier(cfg *config.Config, rule config.RouteRule, fit fitDecision, chose
 	// Nothing fits at all — largest known budget, best-effort.
 	var all []cand
 	for tier, alias := range rule.Tiers {
-		if b := budgetFor(cfg, alias, fit.assumeUnsized); b > 0 {
+		if b := tierBudget(cfg, alias); b > 0 {
 			all = append(all, cand{tier, b})
 		}
 	}

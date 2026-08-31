@@ -29,7 +29,7 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 		anthropic.WriteError(w, 400, "invalid_request_error", "agentic: "+err.Error())
 		return backend.Result{Status: 400, ErrType: "invalid_request_error"}
 	}
-	chatReq, err := TranslateRequest(req, call.Route, call.PromptCacheKey())
+	chatReq, err := TranslateRequest(req, call.Route)
 	if err != nil {
 		anthropic.WriteError(w, 400, "invalid_request_error", "agentic translate: "+err.Error())
 		return backend.Result{Status: 400, ErrType: "invalid_request_error"}

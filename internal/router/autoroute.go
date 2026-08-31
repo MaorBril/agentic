@@ -44,10 +44,7 @@ type decision struct {
 	// alongside tier so a task override survives mid-turn tool_result
 	// round-trips the same way the tier does.
 	task string
-	// downVotes counts consecutive new turns that asked to move to a
-	// cheaper tier while a hold was in force. See shouldHoldTier.
-	downVotes int
-	at        time.Time
+	at   time.Time
 }
 
 // resetCache clears sticky per-session decisions. Called on config reload
@@ -59,33 +56,6 @@ func (a *autoRouter) resetCache() {
 	a.cache = map[string]decision{}
 	a.mu.Unlock()
 }
-
-// Tier ordering for flap control. Only the canonical tier names are
-// ranked; a rule using its own names simply gets no hysteresis rather
-// than a guessed ordering.
-var tierRanks = map[string]int{"light": 0, "standard": 1, "deep": 2}
-
-func tierRank(tier string) (int, bool) {
-	r, ok := tierRanks[tier]
-	return r, ok
-}
-
-var (
-	// flapCooldown is how long a tier choice can suppress a downshift.
-	// Sized to upstream prefix-cache TTLs (~5 minutes of inactivity on
-	// both Anthropic and OpenAI): once the cache has expired there is
-	// nothing left to protect, so the classifier gets its way again.
-	flapCooldown = 5 * time.Minute
-	// flapMinBytes is the conversation size below which a downshift is
-	// always allowed. Re-priming a short prefix on another model costs
-	// little; ~80KB of request body is roughly 20K tokens.
-	flapMinBytes = 80_000
-	// flapVotes is how many consecutive new turns must ask for a cheaper
-	// tier before the move happens. One held turn is enough to absorb
-	// alternation (deep/light/deep never produces two light votes in a
-	// row) without freezing the tier for the rest of the session.
-	flapVotes = 2
-)
 
 const classifierPrompt = `You route requests inside a coding agent to a model tier. Reply with exactly one word: deep, standard, or light.
 
@@ -162,8 +132,7 @@ func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *conf
 			if !isNewTurn {
 				cachedHash = prev.userHash
 			}
-			a.cacheDecision(key, decision{userHash: cachedHash, tier: tier,
-				task: prev.task, downVotes: prev.downVotes})
+			a.cacheDecision(key, cachedHash, tier, prev.task)
 			return alias, tier, combineReason(taskReason, sizeReason)
 		}
 	}
@@ -176,9 +145,7 @@ func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *conf
 	// select a different model that also fits the request.
 	if t, ok := onlyEligibleTier(fit); ok && len(rule.Tasks) == 0 {
 		a.logFit(rule, fit, "", t, "only")
-		// Size left exactly one viable tier, so no classifier opinion was
-		// expressed and there is no downshift to hold.
-		a.cacheDecision(key, decision{userHash: hash, tier: t})
+		a.cacheDecision(key, hash, t, "")
 		return rule.Tiers[t], t, ""
 	}
 
@@ -205,18 +172,6 @@ func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *conf
 		tier = fallback
 	}
 
-	// Flap control: make a downshift that would abandon a warm, expensive
-	// prefix cache prove itself first (see shouldHoldTier).
-	var flapReason string
-	downVotes := 0
-	if hasPrev && tier != prev.tier {
-		if _, valid := rule.Tiers[prev.tier]; valid && shouldHoldTier(prev, tier, len(raw)) {
-			flapReason = "flap:" + tier + "→" + prev.tier
-			downVotes = prev.downVotes + 1
-			tier = prev.tier
-		}
-	}
-
 	// The classifier has no notion of size; if it picked a tier the request
 	// won't fit, remap upward to the smallest tier that does.
 	var sizeReason string
@@ -229,9 +184,9 @@ func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *conf
 
 	var taskReason string
 	alias, taskReason = a.applyTask(cfg, rule, fit, tier, task)
-	reason = combineReason(taskReason, sizeReason, flapReason)
+	reason = combineReason(taskReason, sizeReason)
 
-	a.cacheDecision(key, decision{userHash: hash, tier: tier, task: task, downVotes: downVotes})
+	a.cacheDecision(key, hash, tier, task)
 	return alias, tier, reason
 }
 
@@ -263,45 +218,6 @@ func (a *autoRouter) applyTask(cfg *config.Config, rule config.RouteRule, fit fi
 	return tierAlias, "task:" + task + ":size-ineligible"
 }
 
-// shouldHoldTier reports whether the session should stay on prev.tier
-// instead of moving to the classifier's cheaper choice.
-//
-// Switching models mid-session is not free: the new provider has none of
-// this conversation's prefix cached, so the first turn after a switch
-// re-primes the whole prefix at full input price. At a six-figure context
-// that dwarfs whatever the cheaper tier saves on one turn's output, and a
-// classifier that alternates deep/light/deep pays it on every alternation.
-// So a downshift has to be worth the re-prime: it is allowed when the
-// prefix is short enough that re-priming is cheap, or when the cache has
-// gone cold anyway and there is nothing left to lose.
-//
-// Escalation is never suppressed — it is usually size-driven or a genuinely
-// harder turn, and paying for a cold prefix to answer it correctly is the
-// trade this whole router exists to make.
-func shouldHoldTier(prev decision, chosen string, bodyBytes int) bool {
-	chosenRank, ok := tierRank(chosen)
-	if !ok {
-		return false
-	}
-	prevRank, ok := tierRank(prev.tier)
-	if !ok {
-		return false
-	}
-	if chosenRank >= prevRank {
-		return false // escalation, or a lateral move between equals
-	}
-	if bodyBytes < flapMinBytes {
-		return false // short prefix: re-priming it is cheap
-	}
-	if time.Since(prev.at) >= flapCooldown {
-		return false // the cache has expired; there is nothing left to lose
-	}
-	// Persistence beats a single cheap-looking turn: a session that has
-	// genuinely moved to lighter work asks again on the next turn and gets
-	// it, while an alternating classifier never accumulates two votes.
-	return prev.downVotes+1 < flapVotes
-}
-
 // combineReason joins non-empty routing-reason components ("task:...",
 // "size:...") for observability, task first since task selection is the
 // conceptually primary decision and size just describes whether the
@@ -316,15 +232,14 @@ func combineReason(parts ...string) string {
 	return strings.Join(nonEmpty, ";")
 }
 
-// cacheDecision stores a decision under key, stamping it with the current
-// time and flushing the cache when it exceeds 1000 entries.
-func (a *autoRouter) cacheDecision(key string, d decision) {
-	d.at = time.Now()
+// cacheDecision stores a tier(+task) decision under key, flushing the cache
+// when it exceeds 1000 entries.
+func (a *autoRouter) cacheDecision(key, hash, tier, task string) {
 	a.mu.Lock()
 	if len(a.cache) > 1000 {
 		a.cache = map[string]decision{}
 	}
-	a.cache[key] = d
+	a.cache[key] = decision{userHash: hash, tier: tier, task: task, at: time.Now()}
 	a.mu.Unlock()
 }
 
