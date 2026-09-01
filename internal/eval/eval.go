@@ -44,7 +44,18 @@ const (
 	// interpreter, package/API mismatch, or grader) failing to produce a
 	// report for a candidate's patch.
 	StatusGradingError = "grading_error"
+	// StatusVerifierError covers a local verifier reporting that it could not
+	// run — a missing toolchain or container image, say — rather than that
+	// the candidate's work is wrong. Verifiers signal this with exit code
+	// VerifierInfraExit.
+	StatusVerifierError = "verifier_error"
 )
+
+// VerifierInfraExit is the exit code a local verifier uses to say "I could
+// not judge this candidate". Anything else non-zero is a candidate failure.
+// Without this, a machine missing a Docker image silently scores as a model
+// loss, which is worse than no measurement at all.
+const VerifierInfraExit = 2
 
 // Pair outcomes.
 const (
@@ -294,7 +305,8 @@ func (c CandidateResult) ModelFailed() bool {
 // unscoreable rather than a model loss.
 func (c CandidateResult) InfraFailed() bool {
 	switch c.Status {
-	case StatusWorkspaceError, StatusSetupError, StatusDockerError, StatusGradingError:
+	case StatusWorkspaceError, StatusSetupError, StatusDockerError, StatusGradingError,
+		StatusVerifierError:
 		return true
 	default:
 		return false
@@ -636,6 +648,14 @@ func (r *Runner) runCandidate(ctx context.Context, manifest *Manifest, task Task
 		res.Verifier = VerifierResult{ExitCode: -1, Skipped: "candidate " + res.Status}
 	} else {
 		res.Verifier = verify(ctx, r.Exec, workspace, task.Verifier, filepath.Join(dir, "verifier.log"))
+		if !res.Verifier.Passed && res.Verifier.ExitCode == VerifierInfraExit {
+			// The verifier could not judge this candidate. Recording it as a
+			// loss would blame the model for our missing toolchain.
+			res.Status = StatusVerifierError
+			if res.Error == "" {
+				res.Error = "verifier could not run: " + firstLine(res.Verifier.Output)
+			}
+		}
 	}
 
 	res.Usage, res.RouteTrace = r.telemetry(res.SessionID)
@@ -643,6 +663,20 @@ func (r *Runner) runCandidate(ctx context.Context, manifest *Manifest, task Task
 		return res, err
 	}
 	return res, nil
+}
+
+// firstLine is the most useful part of a verifier's output for an error
+// summary: its last line is the verdict, but the first explains the fault.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			if len(trimmed) > 300 {
+				return trimmed[:300]
+			}
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // telemetry reads back the router's own record of the candidate's session.
