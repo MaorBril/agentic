@@ -1,6 +1,7 @@
 package router
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/maorbril/agentic/internal/anthropic"
@@ -60,7 +61,7 @@ func TestClassifyTierFitNoBudgetsShortCircuits(t *testing.T) {
 		},
 	}
 	rule := config.RouteRule{Tiers: map[string]string{"deep": "opus", "standard": "sonnet"}}
-	fit := classifyTierFit(cfg, rule, reqWith("hello"), 0)
+	fit := classifyTierFit(cfg, rule, reqWith("hello"), 0, nil)
 	if fit.Required != 0 || fit.EstInput != 0 {
 		t.Errorf("expected short-circuit, got Required=%d EstInput=%d", fit.Required, fit.EstInput)
 	}
@@ -73,7 +74,7 @@ func TestClassifyTierFitFilters(t *testing.T) {
 	cfg := sizedCfg()
 	rule := config.RouteRule{Tiers: map[string]string{"deep": "opus", "standard": "sonnet", "light": "qwen"}}
 	// ~30000 tokens (60000 chars / 3.5 → ~17143, +10% margin ~18857, +reserved) → exceeds qwen's 8K, fits sonnet's 32K and opus's 128K.
-	fit := classifyTierFit(cfg, rule, reqWith(repeat("w ", 30000)), 0)
+	fit := classifyTierFit(cfg, rule, reqWith(repeat("w ", 30000)), 0, nil)
 	if fit.Required == 0 {
 		t.Fatal("expected an estimate")
 	}
@@ -98,7 +99,7 @@ func TestTaskMaxOutputDoesNotInflateTierRequirement(t *testing.T) {
 		Tiers: map[string]string{"deep": "opus", "standard": "sonnet", "light": "qwen"},
 		Tasks: map[string]string{"implementation": "large-task"},
 	}
-	fit := classifyTierFit(cfg, rule, reqWith("hello"), 0)
+	fit := classifyTierFit(cfg, rule, reqWith("hello"), 0, nil)
 	if !fit.Eligible["light"] || fit.Required >= 8000 {
 		t.Errorf("task output cap inflated tier requirement: required=%d eligible=%v", fit.Required, fit.Eligible)
 	}
@@ -157,11 +158,11 @@ func TestPromptTooLong(t *testing.T) {
 	route, _ := cfg.Resolve("tiny") // 1000 budget
 
 	// Small request fits.
-	if overflow, _, _ := promptTooLong(route, reqWith("hi")); overflow {
+	if overflow, _, _ := promptTooLong(route, reqWith("hi"), nil); overflow {
 		t.Error("small request should not overflow")
 	}
 	// Large request overflows.
-	overflow, required, budget := promptTooLong(route, reqWith(repeat("w ", 10000)))
+	overflow, required, budget := promptTooLong(route, reqWith(repeat("w ", 10000)), nil)
 	if !overflow {
 		t.Errorf("large request should overflow, required=%d budget=%d", required, budget)
 	}
@@ -173,18 +174,12 @@ func TestPromptTooLong(t *testing.T) {
 func TestPromptTooLongUnknownBudgetNoGuard(t *testing.T) {
 	cfg := sizedCfg()
 	route, _ := cfg.Resolve("unknown") // no context_window
-	if overflow, _, _ := promptTooLong(route, reqWith(repeat("w ", 100000))); overflow {
+	if overflow, _, _ := promptTooLong(route, reqWith(repeat("w ", 100000)), nil); overflow {
 		t.Error("unknown budget must never trip the guard")
 	}
 }
 
-func repeat(s string, n int) string {
-	out := ""
-	for i := 0; i < n; i++ {
-		out += s
-	}
-	return out
-}
+func repeat(s string, n int) string { return strings.Repeat(s, n) }
 
 // --- byte-size guard ---
 
@@ -229,7 +224,7 @@ func TestClassifyTierFitFiltersByBytes(t *testing.T) {
 	rule := config.RouteRule{Tiers: map[string]string{"deep": "big", "light": "small"}}
 	// Body of 2000 bytes exceeds small's 1024-byte cap but fits big. Both
 	// tiers have the same 128K token budget, so only the byte cap differentiates.
-	fit := classifyTierFit(cfg, rule, reqWith("hi"), 2000)
+	fit := classifyTierFit(cfg, rule, reqWith("hi"), 2000, nil)
 	if fit.Eligible["light"] {
 		t.Error("small (1024-byte cap) should be filtered out by a 2000-byte body")
 	}

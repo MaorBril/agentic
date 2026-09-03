@@ -22,6 +22,7 @@ import (
 	"github.com/maorbril/agentic/internal/config"
 	"github.com/maorbril/agentic/internal/pricing"
 	"github.com/maorbril/agentic/internal/store"
+	"github.com/maorbril/agentic/internal/tokens"
 )
 
 type Server struct {
@@ -34,6 +35,7 @@ type Server struct {
 	oai     *openaibe.Backend
 	cli     *clibe.Backend
 	gate    *budget.Gate
+	calib   *calibrator
 	auto    *autoRouter
 	goal    *goalRouter
 	log     *slog.Logger
@@ -47,6 +49,7 @@ func NewServer(cfg *config.Config, token, dataDir string, st *store.Store, logge
 	s.cfg.Store(cfg)
 	s.pricing.Store(pricing.Load(dataDir, cfg))
 	s.gate = budget.NewGate(cfg, st, logger)
+	s.calib = newCalibrator(st, logger)
 	s.auto = &autoRouter{classify: s.classifyViaBackend, classifyTask: s.classifyTaskViaBackend, cache: map[string]decision{}, log: logger}
 	s.goal = &goalRouter{classify: s.classifyGoalViaBackend}
 	return s
@@ -123,7 +126,14 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 			return
 		}
 		cfg := s.cfg.Load()
+		calib := s.calib.get()
 		sessionID := r.Header.Get("X-Agentic-Session")
+		// gauge is the budget this session's client-facing token counts
+		// are scaled against — one budget per routing rule, so the
+		// context gauge does not change meaning when the tier does. 0
+		// for a directly-addressed alias or a pinned session: those
+		// scale against the model they name.
+		gauge := 0
 		pinModel := r.Header.Get("X-Agentic-Pin-Model")
 		resolveAlias := env.Model
 		if pinModel != "" {
@@ -139,7 +149,8 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 				resolveAlias = pinModel
 			}
 		} else if rule, ok := cfg.Routing[env.Model]; ok {
-			chosen, tier, reason := s.auto.route(r.Context(), rule, cfg, raw, sessionID)
+			chosen, tier, reason := s.auto.route(r.Context(), rule, cfg, raw, sessionID, calib)
+			gauge = gaugeBudget(cfg, rule)
 			s.log.Info("autoroute", "alias", env.Model, "tier", tier, "model", chosen, "reason", reason)
 			resolveAlias = chosen
 			if sessionID != "" {
@@ -175,9 +186,11 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 		// reach upstream and fail with a mangled, provider-specific error.
 		// 400 (not 413) so Claude Code doesn't retry-spin — same rationale as
 		// the budget gate below. count_tokens never dispatches, so skip it.
+		var comp tokens.Composition
 		if !countTokens {
 			if req, perr := anthropic.ParseRequest(raw); perr == nil {
-				if overflow, required, budget := promptTooLong(route, req); overflow {
+				comp = tokens.Compose(req)
+				if overflow, required, budget := promptTooLong(route, req, calib); overflow {
 					msg := fmt.Sprintf("agentic: request too large for model %q context budget "+
 						"(estimated %d + reserved output exceeds budget %d); "+
 						"reduce the conversation or switch models",
@@ -218,7 +231,11 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 			}
 		}
 
-		call := &backend.Call{Raw: raw, Envelope: env, Route: route, Header: r.Header, Query: r.URL.Query()}
+		call := &backend.Call{
+			Raw: raw, Envelope: env, Route: route,
+			Header: r.Header, Query: r.URL.Query(),
+			GaugeBudget: gauge, Calibration: calib,
+		}
 		var be backend.Backend
 		switch route.Provider.Type {
 		case config.ProviderAnthropic:
@@ -240,12 +257,12 @@ func (s *Server) handleMessages(countTokens bool) http.HandlerFunc {
 		}
 
 		if !countTokens {
-			s.recordUsage(r, route, env.Model, res, time.Since(start))
+			s.recordUsage(r, route, env.Model, res, time.Since(start), comp, gauge)
 		}
 	}
 }
 
-func (s *Server) recordUsage(r *http.Request, route config.Resolved, alias string, res backend.Result, dur time.Duration) {
+func (s *Server) recordUsage(r *http.Request, route config.Resolved, alias string, res backend.Result, dur time.Duration, comp tokens.Composition, gauge int) {
 	u := res.Usage
 	if u == (anthropic.Usage{}) && res.ErrType == "" {
 		return
@@ -277,6 +294,10 @@ func (s *Server) recordUsage(r *http.Request, route config.Resolved, alias strin
 		CtxBudget:        budget,
 		ReportedInput:    res.ReportedInput,
 		DurationMS:       dur.Milliseconds(),
+		EstInput:         comp.Total(),
+		EstSystem:        comp.System,
+		EstTools:         comp.Tools,
+		GaugeBudget:      gauge,
 	}
 	if err := s.store.RecordUsage(ev); err != nil {
 		s.log.Warn("usage insert failed", "err", err)
@@ -298,6 +319,15 @@ func (s *Server) recordUsage(r *http.Request, route config.Resolved, alias strin
 			"ctx_budget", budget,
 			"ctx_reported", res.ReportedInput,
 			"ctx_pct", fmt.Sprintf("%.1f", 100*float64(trueIn)/float64(budget)))
+	}
+	if gauge > 0 && gauge != budget {
+		attrs = append(attrs, "ctx_gauge", gauge)
+	}
+	if comp.Total() > 0 {
+		// The fixed tax: system prompt + tool schemas are re-sent on every
+		// request whatever the turn is about.
+		attrs = append(attrs, "est_in", comp.Total(),
+			"est_fixed", comp.System+comp.Tools, "est_tools", comp.Tools)
 	}
 	s.log.Info("request", attrs...)
 }

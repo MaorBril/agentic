@@ -181,7 +181,20 @@ agentic models add qwen --provider local --id qwen3-coder-30b --context-window 3
 agentic models add glm  --provider z --id glm-4.7 --context-window 200000 --effective-context 60000
 ```
 
-`effective_context` is the attention knob: the client compacts at 60K real tokens even though the window is nominally 200K, keeping the model in its coherent range. Pricing and budgets always record true usage; `agentic context` shows a session's true-vs-reported trajectory for tuning these numbers. Details and research methodology: [docs/context-scaling.md](docs/context-scaling.md).
+`effective_context` is the attention knob: the client compacts at 60K real tokens even though the window is nominally 200K, keeping the model in its coherent range. Pricing and budgets always record true usage; `agentic context` shows a session's true-vs-reported trajectory for tuning these numbers.
+
+Under `model: auto` the gauge is anchored to **one** budget for the whole rule — by default the largest window the rule can route to — so it means the same thing on every turn. Scaling per serving model instead made a conversation read 30% full on a 1M model and 95% on a 200K one, and since Claude Code compacts on whatever the last turn reported, a single cheap turn could throw away context the big model still had room for. Turns that outgrow a smaller tier are remapped up to one that fits, which the router already did for size. Set `context_gauge: min` on the rule to keep every tier reachable at any conversation length instead, or `context_gauge: model` for the old per-request behavior.
+
+Details, the cost trade-off, and research methodology: [docs/context-scaling.md](docs/context-scaling.md).
+
+## Token utilization
+
+Two more things keep a session from spending window on nothing:
+
+- **Estimator calibration.** Token counts for translated models are a character heuristic, deliberately biased high. The router measures that guess against what upstream actually billed (per model, from its own usage log) and corrects it, so an over-count stops being subtracted from every context budget it checks. `agentic context` prints the measured accuracy; a model needs 20 requests before its correction is trusted, and corrections are clamped so a bad sample can never shrink an estimate into a window it will not fit.
+- **Cache-hit reporting.** `agentic cost` shows what share of each model's input was served from an upstream prefix cache. Prompt caching is the single largest lever on the input bill, and it was previously invisible — worth checking before reaching for anything cleverer.
+
+`agentic context` also breaks down where a session's context goes — system prompt, tool schemas, conversation — since the first two are re-sent in full on every request whatever the turn is about.
 
 ## Model evaluations
 
@@ -265,7 +278,7 @@ main · sonnet · sess $0.84 · day $4.31/$25 [██░░░░]
 Two things you should understand before routing through agentic:
 
 - **Billing.** Normal traffic through the router is billed to **API keys**, not your Claude Pro/Max subscription. OAuth credentials are never proxied. For Claude subscription billing, use a `passthrough: true` profile — normal claude, no tracking. [CLI delegation](#delegating-to-another-cli) instead bills the peer CLI's own subscription (ChatGPT or SuperGrok/X Premium+) through its cached local login, which agentic invokes but never reads. That spend happens outside the router, so delegated runs appear in `agentic cost` as $0 unpriced rows with estimated token counts and budgets cannot gate them.
-- **Fidelity.** Non-Anthropic models work through translation, but Claude Code's prompts and tool patterns are tuned for Claude, so expect them to be clunkier in the main loop. They shine as cheap workhorses for background tasks and subagents. Specific gaps: no prompt caching on OpenAI-dialect backends (provider-side implicit caching still shows up as cache reads), thinking blocks are display-only, Anthropic server tools (web search, code execution) are unavailable on translated models, `top_k` is dropped, stop sequences truncate to four, and token counting for translated models is a deliberate ~15% overestimate so auto-compact fires early instead of overflowing context. Set `max_output` on models whose output cap is below what Claude Code requests (it asks for 32K), and `context_window` on models whose window differs from the ~200K Claude Code assumes (see [Context scaling](#context-scaling)).
+- **Fidelity.** Non-Anthropic models work through translation, but Claude Code's prompts and tool patterns are tuned for Claude, so expect them to be clunkier in the main loop. They shine as cheap workhorses for background tasks and subagents. Specific gaps: no `cache_control` breakpoints on OpenAI-dialect backends (provider-side implicit caching still shows up as cache reads, measurable with `agentic cost`), thinking blocks are display-only, Anthropic server tools (web search, code execution) are unavailable on translated models, `top_k` is dropped, stop sequences truncate to four, and token counting for translated models is a deliberate ~15% overestimate so auto-compact fires early instead of overflowing context. Set `max_output` on models whose output cap is below what Claude Code requests (it asks for 32K), and `context_window` on models whose window differs from the ~200K Claude Code assumes (see [Context scaling](#context-scaling)).
 
 ## Subagents on any model
 

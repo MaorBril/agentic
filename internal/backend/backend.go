@@ -12,6 +12,7 @@ import (
 
 	"github.com/maorbril/agentic/internal/anthropic"
 	"github.com/maorbril/agentic/internal/config"
+	"github.com/maorbril/agentic/internal/tokens"
 )
 
 // Call is one client request, carrying both the raw body (byte-faithful
@@ -22,6 +23,31 @@ type Call struct {
 	Route    config.Resolved
 	Header   http.Header
 	Query    url.Values
+	// GaugeBudget is the context budget the client-facing token counts are
+	// scaled against, chosen once per routing rule so the gauge means the
+	// same thing on every turn of a session (see router.gaugeBudget).
+	// 0 means "use the resolved model's own budget" — the case for a
+	// directly-addressed alias, a pinned session, or context_gauge: model.
+	GaugeBudget int
+	// Calibration corrects the raw token estimate against measured
+	// upstream usage. Nil is valid and means uncorrected.
+	Calibration tokens.Calibration
+}
+
+// ScaleBudget is the budget client-facing token counts scale against:
+// the session-stable gauge budget when the router set one, else the
+// resolved model's own.
+func (c *Call) ScaleBudget() int {
+	if c.GaugeBudget > 0 {
+		return c.GaugeBudget
+	}
+	return c.Route.Model.ContextBudget()
+}
+
+// EstimateInput returns the calibrated input estimate for a parsed
+// request under this call's model.
+func (c *Call) EstimateInput(req *anthropic.MessagesRequest) int64 {
+	return c.Calibration.Apply(c.Route.Model.ID, tokens.Estimate(req))
 }
 
 // Result is what a backend reports after serving a call. Usage is always

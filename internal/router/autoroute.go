@@ -16,6 +16,7 @@ import (
 	"github.com/maorbril/agentic/internal/anthropic"
 	"github.com/maorbril/agentic/internal/backend"
 	"github.com/maorbril/agentic/internal/config"
+	"github.com/maorbril/agentic/internal/tokens"
 )
 
 // autoRouter implements dynamic tier routing: a cheap classifier model
@@ -74,7 +75,7 @@ Request to classify:
 // behavior is byte-for-byte identical to before task-aware routing existed:
 // the task branch below is only ever reached with task=="", which is a
 // documented no-op in applyTask.
-func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *config.Config, raw []byte, sessionID string) (alias, tier, reason string) {
+func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *config.Config, raw []byte, sessionID string, calib tokens.Calibration) (alias, tier, reason string) {
 	fallback := rule.Default
 	if fallback == "" {
 		fallback = "standard"
@@ -94,7 +95,7 @@ func (a *autoRouter) route(ctx context.Context, rule config.RouteRule, cfg *conf
 	// Size-aware fit: which tiers can hold this request? Required==0 and no
 	// byte caps means no tier has a known limit — the backward-compat fast
 	// path (no estimate, no filtering).
-	fit := classifyTierFit(cfg, rule, req, int64(len(raw)))
+	fit := classifyTierFit(cfg, rule, req, int64(len(raw)), calib)
 
 	userText, isNewTurn := lastUserText(req)
 	hash := hashText(userText)
@@ -210,7 +211,7 @@ func (a *autoRouter) applyTask(cfg *config.Config, rule config.RouteRule, fit fi
 	if !mapped || candidate == "" {
 		return tierAlias, ""
 	}
-	if fit.Required == 0 || aliasFits(cfg, candidate, fit.Required, fit.BodyBytes) {
+	if fit.Required == 0 || fit.aliasFits(cfg, candidate) {
 		return candidate, "task:" + task
 	}
 	a.logFit(rule, fit, task, tier, "task-size-ineligible")

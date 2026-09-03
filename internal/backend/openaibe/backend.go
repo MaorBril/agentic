@@ -66,13 +66,13 @@ func (b *Backend) Messages(ctx context.Context, call *backend.Call, w http.Respo
 		return writeUpstreamError(w, resp, call.Route.ProviderName, call.Route.Model.ID)
 	}
 
-	scale := tokens.ScaleFactor(call.Route.Model.ContextBudget())
+	scale := tokens.ScaleFactor(call.ScaleBudget())
 
 	if req.Stream {
 		sse := anthropic.NewSSEWriter(w)
 		state := newStreamState(sse, call.Envelope.Model)
 		state.scale = scale
-		state.estInput = tokens.ScaleCount(tokens.Estimate(req), scale)
+		state.estInput = tokens.ScaleCount(call.EstimateInput(req), scale)
 		usage, errType := state.Run(ctx, resp.Body)
 		status := 200
 		if errType == "client_disconnect" {
@@ -116,7 +116,7 @@ func (b *Backend) CountTokens(ctx context.Context, call *backend.Call, w http.Re
 		anthropic.WriteError(w, 400, "invalid_request_error", "agentic: "+err.Error())
 		return backend.Result{Status: 400, ErrType: "invalid_request_error"}
 	}
-	n := tokens.ScaleCount(tokens.Estimate(req), tokens.ScaleFactor(call.Route.Model.ContextBudget()))
+	n := tokens.ScaleCount(call.EstimateInput(req), tokens.ScaleFactor(call.ScaleBudget()))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(anthropic.CountTokensResponse{InputTokens: n})
 	return backend.Result{Status: 200}

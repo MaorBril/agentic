@@ -71,8 +71,15 @@ var costCmd = &cobra.Command{
 			if key == "" {
 				key = "(unattributed)"
 			}
-			fmt.Printf("  %-28s %8s in / %-8s out   $%.2f\n",
-				key, humanTokens(r.InputTokens), humanTokens(r.OutputTokens), r.CostUSD)
+			// Cache hit rate is the headline number for prompt caching:
+			// a session that re-primes its prefix every turn shows near 0
+			// here while burning full-price input on tokens it already sent.
+			cache := "   —"
+			if r.InputTokens > 0 {
+				cache = fmt.Sprintf("%3.0f%%", r.CacheHitRate()*100)
+			}
+			fmt.Printf("  %-28s %8s in / %-8s out  %s cached  $%.2f\n",
+				key, humanTokens(r.InputTokens), humanTokens(r.OutputTokens), cache, r.CostUSD)
 		}
 		if unpriced > 0 {
 			fmt.Printf("  ⚠ %d requests on unpriced models (untracked spend) — add pricing in config\n", unpriced)

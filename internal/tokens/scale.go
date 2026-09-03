@@ -16,6 +16,17 @@ import (
 // models compact late.
 const AssumedWindow = 200_000
 
+// BudgetOrAssumed maps an unknown (0) budget onto AssumedWindow. A model
+// with no declared window is scaled by factor 1, which is precisely the
+// same thing as declaring a budget equal to the client's assumed window —
+// making the two comparable when picking one budget for a whole session.
+func BudgetOrAssumed(budget int) int {
+	if budget <= 0 {
+		return AssumedWindow
+	}
+	return budget
+}
+
 // ScaleFactor returns the multiplier applied to client-facing token counts
 // for a model with the given context budget. budget <= 0 means unknown →
 // no scaling.

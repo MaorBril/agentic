@@ -110,6 +110,22 @@ CREATE INDEX IF NOT EXISTS idx_route_events_session ON route_events(session_id, 
 		"ALTER TABLE usage_events ADD COLUMN reported_input INTEGER DEFAULT 0",
 		"ALTER TABLE usage_events ADD COLUMN duration_ms INTEGER DEFAULT 0",
 		"ALTER TABLE route_decisions ADD COLUMN reason TEXT DEFAULT ''",
+		// est_* are the router's own bias-high estimate of the request,
+		// split by section, recorded UNCALIBRATED. Comparing est_input to
+		// the billed input is what calibration is derived from, so storing
+		// a corrected number here would feed the correction back into
+		// itself; est_system/est_tools make the fixed per-request tax
+		// (system prompt + tool schemas) queryable against the part that
+		// actually accumulates.
+		"ALTER TABLE usage_events ADD COLUMN est_input INTEGER DEFAULT 0",
+		"ALTER TABLE usage_events ADD COLUMN est_system INTEGER DEFAULT 0",
+		"ALTER TABLE usage_events ADD COLUMN est_tools INTEGER DEFAULT 0",
+		// The budget the client-facing gauge was scaled against, which
+		// under a session-stable anchor is no longer the same thing as the
+		// serving model's own ctx_budget. Both are needed to read a
+		// trajectory: ctx_budget says how full the model was, gauge_budget
+		// says what the client was told.
+		"ALTER TABLE usage_events ADD COLUMN gauge_budget INTEGER DEFAULT 0",
 	} {
 		if _, err := s.db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
@@ -137,18 +153,24 @@ type UsageEvent struct {
 	CtxBudget        int   // model's context budget (0 = unknown/unscaled)
 	ReportedInput    int64 // input-side tokens as reported to the client
 	DurationMS       int64 // end-to-end router request duration
+	EstInput         int64 // raw (uncalibrated) input estimate for this request
+	EstSystem        int64 // portion of EstInput attributed to the system prompt
+	EstTools         int64 // portion of EstInput attributed to tool schemas
+	GaugeBudget      int   // budget the client gauge was scaled against (0 = the model's own)
 }
 
 func (s *Store) RecordUsage(e UsageEvent) error {
 	_, err := s.db.Exec(`INSERT INTO usage_events
 (ts, session_id, profile, provider, model, model_alias,
  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
- cost_usd, priced, request_id, status, err_type, ctx_budget, reported_input, duration_ms)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+ cost_usd, priced, request_id, status, err_type, ctx_budget, reported_input, duration_ms,
+ est_input, est_system, est_tools, gauge_budget)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		e.TS.Unix(), e.SessionID, e.Profile, e.Provider, e.Model, e.Alias,
 		e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens,
 		e.CostUSD, boolToInt(e.Priced), e.RequestID, e.Status, e.ErrType,
-		e.CtxBudget, e.ReportedInput, e.DurationMS)
+		e.CtxBudget, e.ReportedInput, e.DurationMS,
+		e.EstInput, e.EstSystem, e.EstTools, e.GaugeBudget)
 	return err
 }
 
@@ -338,7 +360,8 @@ FROM usage_events WHERE session_id = ? ORDER BY ts, id`, sessionID)
 func (s *Store) SessionUsage(sessionID string) ([]UsageEvent, error) {
 	rows, err := s.db.Query(`SELECT ts, session_id, profile, provider, model, model_alias,
   input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
-  priced, request_id, status, err_type, ctx_budget, reported_input, duration_ms
+  priced, request_id, status, err_type, ctx_budget, reported_input, duration_ms,
+  COALESCE(est_input,0), COALESCE(est_system,0), COALESCE(est_tools,0), COALESCE(gauge_budget,0)
 FROM usage_events WHERE session_id = ? ORDER BY ts, id`, sessionID)
 	if err != nil {
 		return nil, err
@@ -351,7 +374,8 @@ FROM usage_events WHERE session_id = ? ORDER BY ts, id`, sessionID)
 		var priced int
 		if err := rows.Scan(&ts, &e.SessionID, &e.Profile, &e.Provider, &e.Model, &e.Alias,
 			&e.InputTokens, &e.OutputTokens, &e.CacheReadTokens, &e.CacheWriteTokens, &e.CostUSD,
-			&priced, &e.RequestID, &e.Status, &e.ErrType, &e.CtxBudget, &e.ReportedInput, &e.DurationMS); err != nil {
+			&priced, &e.RequestID, &e.Status, &e.ErrType, &e.CtxBudget, &e.ReportedInput, &e.DurationMS,
+			&e.EstInput, &e.EstSystem, &e.EstTools, &e.GaugeBudget); err != nil {
 			return nil, err
 		}
 		e.TS = time.Unix(ts, 0)
@@ -374,13 +398,25 @@ WHERE session_id != '' ORDER BY ts DESC, id DESC LIMIT 1`)
 	return id, err
 }
 
-// SpendRow is one line of a cost report.
+// SpendRow is one line of a cost report. InputTokens is the whole input
+// side (fresh + cache read + cache write); CacheReadTokens is the part of
+// it that was served from an upstream prefix cache, which is the number
+// that says whether prompt caching is actually working.
 type SpendRow struct {
-	Key          string // model, profile, or session id depending on grouping
-	InputTokens  int64
-	OutputTokens int64
-	CostUSD      float64
-	Unpriced     int64 // count of events with priced=0
+	Key             string // model, profile, or session id depending on grouping
+	InputTokens     int64
+	OutputTokens    int64
+	CacheReadTokens int64
+	CostUSD         float64
+	Unpriced        int64 // count of events with priced=0
+}
+
+// CacheHitRate is the fraction of input tokens served from cache.
+func (r SpendRow) CacheHitRate() float64 {
+	if r.InputTokens <= 0 {
+		return 0
+	}
+	return float64(r.CacheReadTokens) / float64(r.InputTokens)
 }
 
 // SpendSince aggregates usage from `since`, grouped by "model", "profile",
@@ -393,6 +429,7 @@ func (s *Store) SpendSince(since time.Time, groupBy string) ([]SpendRow, error) 
 	rows, err := s.db.Query(`SELECT `+col+`,
   COALESCE(SUM(input_tokens+cache_read_tokens+cache_write_tokens),0),
   COALESCE(SUM(output_tokens),0),
+  COALESCE(SUM(cache_read_tokens),0),
   COALESCE(SUM(cost_usd),0),
   COALESCE(SUM(1-priced),0)
 FROM usage_events WHERE ts >= ? GROUP BY `+col+` ORDER BY SUM(cost_usd) DESC`, since.Unix())
@@ -403,7 +440,7 @@ FROM usage_events WHERE ts >= ? GROUP BY `+col+` ORDER BY SUM(cost_usd) DESC`, s
 	var out []SpendRow
 	for rows.Next() {
 		var r SpendRow
-		if err := rows.Scan(&r.Key, &r.InputTokens, &r.OutputTokens, &r.CostUSD, &r.Unpriced); err != nil {
+		if err := rows.Scan(&r.Key, &r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CostUSD, &r.Unpriced); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -427,6 +464,110 @@ func (s *Store) TotalSince(since time.Time, profile, session string) (float64, e
 	var total float64
 	err := s.db.QueryRow(q, args...).Scan(&total)
 	return total, err
+}
+
+// CalibrationRow is one model's measured estimator accuracy: what the
+// router guessed the input would be versus what upstream actually billed.
+type CalibrationRow struct {
+	Model     string
+	Requests  int64
+	TrueInput int64 // input + cache read + cache write, as billed
+	EstInput  int64 // the router's raw, uncalibrated estimate
+}
+
+// Ratio is the correction factor: true input / estimated input. Below 1
+// the estimator runs high and is stranding usable context window; above 1
+// it under-counts and its safety bias has been eaten.
+func (r CalibrationRow) Ratio() float64 {
+	if r.EstInput <= 0 {
+		return 0
+	}
+	return float64(r.TrueInput) / float64(r.EstInput)
+}
+
+// EstimateCalibration measures the router's own token estimator against
+// what upstream actually billed, per upstream model, over successful
+// requests since `since`.
+//
+// Ratio of sums, not mean of ratios: a handful of tiny requests should
+// not outvote the large ones, and it is the large ones whose fit against
+// a context budget actually matters. Callers decide how many samples they
+// need before trusting a row.
+func (s *Store) EstimateCalibration(since time.Time) ([]CalibrationRow, error) {
+	rows, err := s.db.Query(`SELECT model, COUNT(*),
+  COALESCE(SUM(input_tokens+cache_read_tokens+cache_write_tokens),0),
+  COALESCE(SUM(est_input),0)
+FROM usage_events
+WHERE ts >= ? AND status = 200 AND COALESCE(est_input,0) > 0
+GROUP BY model ORDER BY COUNT(*) DESC`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CalibrationRow
+	for rows.Next() {
+		var r CalibrationRow
+		if err := rows.Scan(&r.Model, &r.Requests, &r.TrueInput, &r.EstInput); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// CompositionRow is the average makeup of a model's requests: how much of
+// the estimated input is system prompt and tool schemas — paid on every
+// request whatever the turn is about — versus conversation.
+type CompositionRow struct {
+	Model    string
+	Requests int64
+	System   int64
+	Tools    int64
+	Messages int64
+}
+
+func (r CompositionRow) Total() int64 { return r.System + r.Tools + r.Messages }
+
+// FixedFraction is the share of an average request that is system prompt
+// plus tool schemas.
+func (r CompositionRow) FixedFraction() float64 {
+	if r.Total() <= 0 {
+		return 0
+	}
+	return float64(r.System+r.Tools) / float64(r.Total())
+}
+
+// Composition returns average per-request composition by model, for one
+// session (sessionID != "") or across everything since `since`.
+func (s *Store) Composition(sessionID string, since time.Time) ([]CompositionRow, error) {
+	q := `SELECT model, COUNT(*),
+  CAST(AVG(est_system) AS INTEGER),
+  CAST(AVG(est_tools) AS INTEGER),
+  CAST(AVG(est_input - est_system - est_tools) AS INTEGER)
+FROM usage_events WHERE COALESCE(est_input,0) > 0`
+	args := []any{}
+	if sessionID != "" {
+		q += ` AND session_id = ?`
+		args = append(args, sessionID)
+	} else {
+		q += ` AND ts >= ?`
+		args = append(args, since.Unix())
+	}
+	q += ` GROUP BY model ORDER BY COUNT(*) DESC`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CompositionRow
+	for rows.Next() {
+		var r CompositionRow
+		if err := rows.Scan(&r.Model, &r.Requests, &r.System, &r.Tools, &r.Messages); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func boolToInt(b bool) int {

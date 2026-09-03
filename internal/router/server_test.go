@@ -16,6 +16,7 @@ import (
 	"github.com/maorbril/agentic/internal/backend"
 	"github.com/maorbril/agentic/internal/config"
 	"github.com/maorbril/agentic/internal/store"
+	"github.com/maorbril/agentic/internal/tokens"
 )
 
 const testToken = "test-token"
@@ -181,7 +182,8 @@ func TestCLIUsageStaysUnpricedWhenModelIDHasAPIPrice(t *testing.T) {
 	srv := NewServer(cfg, testToken, dir, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv.recordUsage(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), config.Resolved{
 		Alias: "codex", ProviderName: "codex", Provider: cfg.Providers["codex"], Model: cfg.Models["codex"],
-	}, "codex", backend.Result{Status: 200, Usage: anthropic.Usage{InputTokens: 1000, OutputTokens: 1000}}, time.Millisecond)
+	}, "codex", backend.Result{Status: 200, Usage: anthropic.Usage{InputTokens: 1000, OutputTokens: 1000}}, time.Millisecond,
+		tokens.Composition{}, 0)
 
 	rows, err := st.SpendSince(time.Now().Add(-time.Minute), "model")
 	if err != nil || len(rows) != 1 {
