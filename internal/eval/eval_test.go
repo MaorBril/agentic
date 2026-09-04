@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -268,6 +269,75 @@ func TestCandidateFailureSkipsVerifier(t *testing.T) {
 	}
 }
 
+// A verifier that exits with VerifierInfraExit is saying it could not judge
+// the candidate — a missing image or toolchain. Scoring that as a model loss
+// blames the model for our machine.
+// Two runs comparing different models at the same seed must not share a
+// session id: the usage table aggregates by it, so a collision merges their
+// spend into one figure that reads as a per-model result.
+func TestSessionIDSeparatesModels(t *testing.T) {
+	a := sessionID(1, "task-a", 1, "mut", "grok")
+	b := sessionID(1, "task-a", 1, "mut", "glm53")
+	if a == b {
+		t.Fatalf("different models share session id %q", a)
+	}
+	if same := sessionID(1, "task-a", 1, "mut", "grok"); same != a {
+		t.Errorf("session id is not stable: %q then %q", a, same)
+	}
+	if other := sessionID(1, "task-a", 1, "baseline", "grok"); other == a {
+		t.Error("baseline and mut arms of the same model share a session id")
+	}
+	if other := sessionID(2, "task-a", 1, "mut", "grok"); other == a {
+		t.Error("the seed no longer affects the session id")
+	}
+}
+
+func TestVerifierInfraExitIsNotAModelLoss(t *testing.T) {
+	repo := gitRepo(t)
+	ex := &scriptExecutor{
+		claudeStdout: `{"result":"done"}`,
+		verifierErr:  exitCodeError(t, VerifierInfraExit),
+	}
+	runner := &Runner{Exec: ex, Options: Options{
+		Baseline: "a", MUT: "b", Judge: "none", OutputDir: t.TempDir(),
+		Timeout: time.Minute, ClaudeBin: "claude",
+	}}
+	s, err := runner.Run(context.Background(), testManifest(repo, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []CandidateResult{s.Pairs[0].Baseline, s.Pairs[0].MUT} {
+		if c.Status != StatusVerifierError {
+			t.Errorf("status = %q, want %q", c.Status, StatusVerifierError)
+		}
+		if !c.InfraFailed() || c.ModelFailed() {
+			t.Errorf("candidate = %+v, want infra failure and not a model failure", c)
+		}
+	}
+	if s.Pairs[0].Winner != WinnerInfraError {
+		t.Errorf("winner = %q, want %q", s.Pairs[0].Winner, WinnerInfraError)
+	}
+}
+
+// An ordinary non-zero verifier exit stays a candidate loss.
+func TestVerifierFailureIsStillAModelLoss(t *testing.T) {
+	repo := gitRepo(t)
+	ex := &scriptExecutor{claudeStdout: `{"result":"done"}`, verifierErr: exitCodeError(t, 1)}
+	runner := &Runner{Exec: ex, Options: Options{
+		Baseline: "a", MUT: "b", Judge: "none", OutputDir: t.TempDir(),
+		Timeout: time.Minute, ClaudeBin: "claude",
+	}}
+	s, err := runner.Run(context.Background(), testManifest(repo, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []CandidateResult{s.Pairs[0].Baseline, s.Pairs[0].MUT} {
+		if c.Status != StatusComplete || c.InfraFailed() || c.Verifier.Passed {
+			t.Errorf("candidate = %+v, want a completed run with a failed verifier", c)
+		}
+	}
+}
+
 func TestInfraFailureSuppressesJudgeAndIsNotTie(t *testing.T) {
 	repo := gitRepo(t)
 	ex := &scriptExecutor{
@@ -409,7 +479,7 @@ func TestTelemetryPopulatesUsageAndRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid := sessionID(7, "task-a", 1, "baseline")
+	sid := sessionID(7, "task-a", 1, "baseline", "opus")
 	now := time.Now().Truncate(time.Second)
 	if err := st.RecordUsage(store.UsageEvent{TS: now, SessionID: sid, InputTokens: 100, OutputTokens: 20, CostUSD: 0.25, DurationMS: 900, Status: 200}); err != nil {
 		t.Fatal(err)
@@ -484,6 +554,15 @@ func TestCandidateArtifactIsDurable(t *testing.T) {
 	if result.Status != StatusComplete || !result.Verifier.Ran || !result.Verifier.Passed {
 		t.Errorf("result = %+v", result)
 	}
+}
+
+func exitCodeError(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	if err == nil {
+		t.Fatalf("expected exit %d", code)
+	}
+	return err
 }
 
 func exitError(t *testing.T) error {

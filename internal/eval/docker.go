@@ -463,7 +463,7 @@ func swebenchFingerprint(manifest *Manifest, instances []SWEBenchInstance, docke
 // Infrastructure failures are returned as CandidateResult statuses (not Go
 // errors) so the paired run can checkpoint and suppress its judge cleanly.
 func (r *Runner) runSWEBenchCandidate(ctx context.Context, manifest *Manifest, task Task, attempt int, label, model, dir string) (CandidateResult, error) {
-	res := CandidateResult{Label: label, Model: model, SessionID: sessionID(r.Options.Seed, task.ID, attempt, label), ExitCode: -1}
+	res := CandidateResult{Label: label, Model: model, SessionID: sessionID(r.Options.Seed, task.ID, attempt, label, model), ExitCode: -1}
 	if err := os.RemoveAll(dir); err != nil {
 		return res, err
 	}
