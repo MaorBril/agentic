@@ -12,6 +12,7 @@ import (
 
 	"github.com/maorbril/agentic/internal/config"
 	"github.com/maorbril/agentic/internal/launch"
+	"github.com/maorbril/agentic/internal/logrotate"
 	"github.com/maorbril/agentic/internal/router"
 )
 
@@ -86,12 +87,20 @@ func loadConfig() (*config.Config, string, error) {
 	return cfg, dataDir, nil
 }
 
+// Router log ceiling: the current file plus logMaxGenerations archives, so
+// the log costs at most logMaxBytes*(1+logMaxGenerations) on disk. It used to
+// have no ceiling at all and grew past the usage database beside it.
+const (
+	logMaxBytes       = 8 << 20 // 8 MiB
+	logMaxGenerations = 3
+)
+
 func logger() *slog.Logger {
 	dataDir, err := config.DataDir()
 	if err == nil {
-		if f, err := os.OpenFile(filepath.Join(dataDir, "router.log"),
-			os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
-			return slog.New(slog.NewTextHandler(f, nil))
+		if w, err := logrotate.Open(filepath.Join(dataDir, "router.log"),
+			logMaxBytes, logMaxGenerations); err == nil {
+			return slog.New(slog.NewTextHandler(w, nil))
 		}
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, nil))
