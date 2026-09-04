@@ -573,3 +573,25 @@ func exitError(t *testing.T) error {
 	}
 	return err
 }
+
+// Interactive sessions export ENABLE_TOOL_SEARCH=true, and every Bash command
+// they run inherits it — so an eval launched from inside a session would defer
+// tool schemas while the same command from a plain terminal would not. Whether
+// a run is comparable to the one stored beside it must not depend on where it
+// was invoked from.
+func TestEvalEnvPinsToolSearch(t *testing.T) {
+	for _, inherited := range []string{"ENABLE_TOOL_SEARCH=true", "ENABLE_TOOL_SEARCH=auto:50", ""} {
+		var in []string
+		if inherited != "" {
+			in = []string{inherited}
+		}
+		env := evalEnv(in, Options{BaseURL: "http://router", Token: "token", Profile: "main"}, "eval-1", "glm53")
+		joined := strings.Join(env, "\n")
+		if !strings.Contains(joined, "ENABLE_TOOL_SEARCH=false") {
+			t.Errorf("with %q inherited, env did not pin tool search: %s", inherited, joined)
+		}
+		if strings.Contains(joined, "ENABLE_TOOL_SEARCH=true") || strings.Contains(joined, "ENABLE_TOOL_SEARCH=auto") {
+			t.Errorf("with %q inherited, the inherited value survived: %s", inherited, joined)
+		}
+	}
+}

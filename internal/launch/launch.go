@@ -183,6 +183,7 @@ func sessionEnv(env []string, baseURL, token, sessionID, profName string, prof c
 	}
 	env = setEnv(env, "AGENTIC_SESSION_ID", sessionID)
 	env = setEnv(env, "AGENTIC_PROFILE", profName)
+	env = enableToolSearch(env, prof)
 	if prof.TimeoutMS > 0 {
 		env = setEnv(env, "API_TIMEOUT_MS", fmt.Sprint(prof.TimeoutMS))
 	}
@@ -249,8 +250,48 @@ func printSummary(dataDir string, cfg *config.Config, sessionID, profile string)
 	fmt.Fprintln(os.Stderr, line)
 }
 
+// enableToolSearch asks Claude Code to defer tool schemas: send the deferred
+// tools' names up front and the full schema only once the model pulls one in
+// with ToolSearch. The client turns that off on its own when
+// ANTHROPIC_BASE_URL is not a first-party Anthropic host — which the router
+// never is — and then every builtin and MCP schema rides on every request:
+// on a session with 165 MCP tools that measured 186K of tool schemas inside
+// a 200K frame, over the limit before the first user turn.
+//
+// The deferral is the client's own work, not the API's: it answers its own
+// ToolSearch call with tool_reference blocks and adds the bound tool's real
+// schema to the next request's tools array. So the router only has to carry
+// those blocks through, which passthrough does natively and translation
+// renders as text (see anthropic.ContentBlock.FlatText).
+//
+// Precedence, most immediate first: an explicit value in the caller's
+// environment (so a shell can say "false" for the old eager behavior, or
+// "auto:N" to sample it), then the profile's tool_search, then on. A
+// profile that opts out gets an explicit "false" rather than an unset
+// variable, so the choice does not depend on how the client's own gate
+// happens to treat an unrecognized host.
+func enableToolSearch(env []string, prof config.Profile) []string {
+	if hasEnv(env, "ENABLE_TOOL_SEARCH") {
+		return env
+	}
+	if prof.ToolSearch != nil && !*prof.ToolSearch {
+		return setEnv(env, "ENABLE_TOOL_SEARCH", "false")
+	}
+	return setEnv(env, "ENABLE_TOOL_SEARCH", "true")
+}
+
 func setEnv(env []string, key, value string) []string {
 	return append(unsetEnv(env, key), key+"="+value)
+}
+
+func hasEnv(env []string, key string) bool {
+	prefix := key + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func unsetEnv(env []string, key string) []string {

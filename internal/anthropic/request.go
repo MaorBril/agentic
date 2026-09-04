@@ -105,6 +105,9 @@ type ContentBlock struct {
 	ToolUseID string      `json:"tool_use_id,omitempty"`
 	Content   MessageBody `json:"content,omitempty"`
 	IsError   bool        `json:"is_error,omitempty"`
+
+	// tool_reference — a deferred tool the client just pulled in
+	ToolName string `json:"tool_name,omitempty"`
 }
 
 // FlatText renders a tool_result's content (string or blocks) as text.
@@ -119,6 +122,22 @@ func (b ContentBlock) FlatText() string {
 			out += c.Text
 		case "image":
 			out += fmt.Sprintf("\n[image omitted from tool result %s]", b.ToolUseID)
+		case "tool_reference":
+			// Deferred tool loading: Claude Code answers its own ToolSearch
+			// call with bare references and the Anthropic API expands them
+			// into schemas. A translated backend has no such expansion, and
+			// dropping the block would leave the tool result empty — which
+			// some OpenAI-dialect servers reject outright. Say what happened
+			// instead; the client puts the real schema in the next request's
+			// tools array either way.
+			if out != "" {
+				out += "\n"
+			}
+			if c.ToolName == "" {
+				out += "Tool schema loaded."
+				continue
+			}
+			out += "Tool schema loaded: " + c.ToolName
 		}
 	}
 	return out
