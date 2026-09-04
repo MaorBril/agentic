@@ -261,6 +261,8 @@ Docker candidates reach the normal loopback-only router through a temporary rela
 
 Use `--task id` to select instances, `--seed` to reproduce launch order and judge blinding, `--resume` to skip completed pairs, and `--json` for machine-readable output. Infrastructure failures are unscored and never sent to the judge; `--resume` retries those pairs. `--judge none` decides only from verifier pass/fail, with equal outcomes recorded as ties.
 
+A local verifier reports its verdict through its exit code: `0` passed, `2` "I could not judge this candidate" — a missing toolchain, an image that is not present, a container that would not start — and any other non-zero means the candidate's work is wrong. Exit `2` is recorded as `verifier_error`, an infrastructure status, so the pair is unscored, hidden from the judge, and retried by `--resume`. Without that distinction a machine missing a Docker image scores as a model loss, which is worse than no measurement at all.
+
 Artifacts include raw Claude output, patches, container logs, official SWE-bench reports, FAIL_TO_PASS/PASS_TO_PASS details, blinded judge mappings, per-candidate usage and route traces, pair results, the resolved dataset metadata/fingerprint, and `summary.json`. Local setup and verifier commands execute on the host, so review third-party local manifests before running them.
 
 ## Budgets

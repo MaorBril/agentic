@@ -599,7 +599,7 @@ func (r *Runner) runCandidate(ctx context.Context, manifest *Manifest, task Task
 	if manifest.IsDataset() {
 		return r.runSWEBenchCandidate(ctx, manifest, task, attempt, label, model, dir)
 	}
-	res := CandidateResult{Label: label, Model: model, SessionID: sessionID(r.Options.Seed, task.ID, attempt, label), ExitCode: -1}
+	res := CandidateResult{Label: label, Model: model, SessionID: sessionID(r.Options.Seed, task.ID, attempt, label, model), ExitCode: -1}
 	workspace := filepath.Join(dir, "workspace")
 	if err := os.RemoveAll(dir); err != nil {
 		return res, err
@@ -738,7 +738,7 @@ func (r *Runner) runJudge(ctx context.Context, task Task, attempt int, candidate
 	}
 	prompt := judgePrompt(task, first, second)
 	argv := []string{r.Options.ClaudeBin, "--print", "--output-format", "json", "--permission-mode", "bypassPermissions", "--disallowedTools", "Task", "--model", r.Options.Judge, prompt}
-	sid := sessionID(r.Options.Seed, task.ID, attempt, "judge")
+	sid := sessionID(r.Options.Seed, task.ID, attempt, "judge", r.Options.Judge)
 	var stdout, stderr bytes.Buffer
 	judgeDir := filepath.Join(pairDir, "judge")
 	// Run from a clean directory: pairDir contains baseline/mut artifacts
@@ -978,8 +978,14 @@ func hash64(s string) uint64 {
 	}
 	return n
 }
-func sessionID(seed uint64, task string, attempt int, label string) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%d/%s/%d/%s", seed, task, attempt, label)))
+
+// sessionID derives the synthetic session a candidate's router usage is
+// recorded under. The model is part of it: without it, two runs comparing
+// different models at the same seed produce identical ids, and the usage
+// table — which aggregates by session id — silently merges their spend into
+// one figure that looks like a per-model result.
+func sessionID(seed uint64, task string, attempt int, label, model string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d/%s/%d/%s/%s", seed, task, attempt, label, model)))
 	return "eval-" + hex.EncodeToString(sum[:8])
 }
 

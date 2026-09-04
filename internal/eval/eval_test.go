@@ -272,6 +272,26 @@ func TestCandidateFailureSkipsVerifier(t *testing.T) {
 // A verifier that exits with VerifierInfraExit is saying it could not judge
 // the candidate — a missing image or toolchain. Scoring that as a model loss
 // blames the model for our machine.
+// Two runs comparing different models at the same seed must not share a
+// session id: the usage table aggregates by it, so a collision merges their
+// spend into one figure that reads as a per-model result.
+func TestSessionIDSeparatesModels(t *testing.T) {
+	a := sessionID(1, "task-a", 1, "mut", "grok")
+	b := sessionID(1, "task-a", 1, "mut", "glm53")
+	if a == b {
+		t.Fatalf("different models share session id %q", a)
+	}
+	if same := sessionID(1, "task-a", 1, "mut", "grok"); same != a {
+		t.Errorf("session id is not stable: %q then %q", a, same)
+	}
+	if other := sessionID(1, "task-a", 1, "baseline", "grok"); other == a {
+		t.Error("baseline and mut arms of the same model share a session id")
+	}
+	if other := sessionID(2, "task-a", 1, "mut", "grok"); other == a {
+		t.Error("the seed no longer affects the session id")
+	}
+}
+
 func TestVerifierInfraExitIsNotAModelLoss(t *testing.T) {
 	repo := gitRepo(t)
 	ex := &scriptExecutor{
@@ -459,7 +479,7 @@ func TestTelemetryPopulatesUsageAndRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid := sessionID(7, "task-a", 1, "baseline")
+	sid := sessionID(7, "task-a", 1, "baseline", "opus")
 	now := time.Now().Truncate(time.Second)
 	if err := st.RecordUsage(store.UsageEvent{TS: now, SessionID: sid, InputTokens: 100, OutputTokens: 20, CostUSD: 0.25, DurationMS: 900, Status: 200}); err != nil {
 		t.Fatal(err)
