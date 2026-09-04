@@ -1,5 +1,11 @@
 # hero.gif — the 30-second agentic pitch: same claude, what it cost, on any model.
-# Record from the repo root with:  vhs assets/hero.tape
+#
+# Record from the repo root against a throwaway HOME, so the demo shows a
+# synthetic usage log rather than the maintainer's real spend and providers.
+# The recorded shell inherits HOME from the vhs process:
+#
+#   DEMO_HOME=$(assets/hero-demo-home.sh)
+#   HOME="$DEMO_HOME" vhs assets/hero.tape
 
 Output assets/hero.gif
 
@@ -23,11 +29,14 @@ Show
 # 1. It is the claude you already know.
 Type "agentic"
 Enter
-Sleep 8s
+Sleep 9s
+# Exit off-camera. Claude Code warns on stderr about any model name outside its
+# own catalog — which every agentic alias is, by design — and the warning only
+# becomes visible when the TUI tears down.
+Hide
 Type "/exit"
 Enter
-Sleep 3s
-Hide
+Sleep 2s
 Type "clear"
 Enter
 Show

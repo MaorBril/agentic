@@ -7,6 +7,8 @@
 
 **Run Claude Code on any model, with a budget.** Docs and demos: [runagentic.dev](https://runagentic.dev)
 
+![agentic demo](assets/hero.gif)
+
 agentic wraps Claude Code in a thin local router. Your sessions look and feel exactly like `claude` — same TUI, same tools, same updates — but the model behind them can be Anthropic, OpenAI, xAI, or anything OpenAI-compatible (Ollama, vLLM, OpenRouter, DeepSeek, Groq). Whole tasks can also be delegated to a locally logged-in Codex or Grok CLI under your own subscription. Every routed API token is metered, priced, and checked against budgets you set.
 
 ```bash
