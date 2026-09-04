@@ -1,6 +1,11 @@
 # agentic
 
-**Run Claude Code on any model, with a budget.**
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/MaorBril/agentic)](https://github.com/MaorBril/agentic/stargazers)
+[![Last commit](https://img.shields.io/github/last-commit/MaorBril/agentic)](https://github.com/MaorBril/agentic/commits/main)
+[![Go](https://img.shields.io/github/go-mod/go-version/MaorBril/agentic)](go.mod)
+
+**Run Claude Code on any model, with a budget.** Docs and demos: [runagentic.dev](https://runagentic.dev)
 
 agentic wraps Claude Code in a thin local router. Your sessions look and feel exactly like `claude` — same TUI, same tools, same updates — but the model behind them can be Anthropic, OpenAI, xAI, or anything OpenAI-compatible (Ollama, vLLM, OpenRouter, DeepSeek, Groq). Whole tasks can also be delegated to a locally logged-in Codex or Grok CLI under your own subscription. Every routed API token is metered, priced, and checked against budgets you set.
 
@@ -57,6 +62,8 @@ Model names are aliases you define. Claude Code treats model IDs as opaque strin
 curl -fsSL https://raw.githubusercontent.com/maorbril/agentic/main/install.sh | sh
 agentic setup
 ```
+
+Sixty seconds later: the same `claude` you know, now with `agentic cost` telling you what today cost and a budget that stops the spend when you say so.
 
 Or from source: `go install github.com/maorbril/agentic@latest`
 
