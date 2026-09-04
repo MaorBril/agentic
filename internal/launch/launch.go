@@ -183,6 +183,7 @@ func sessionEnv(env []string, baseURL, token, sessionID, profName string, prof c
 	}
 	env = setEnv(env, "AGENTIC_SESSION_ID", sessionID)
 	env = setEnv(env, "AGENTIC_PROFILE", profName)
+	env = enableToolSearch(env)
 	if prof.TimeoutMS > 0 {
 		env = setEnv(env, "API_TIMEOUT_MS", fmt.Sprint(prof.TimeoutMS))
 	}
@@ -249,8 +250,41 @@ func printSummary(dataDir string, cfg *config.Config, sessionID, profile string)
 	fmt.Fprintln(os.Stderr, line)
 }
 
+// enableToolSearch asks Claude Code to defer tool schemas: send the deferred
+// tools' names up front and the full schema only once the model pulls one in
+// with ToolSearch. The client turns that off on its own when
+// ANTHROPIC_BASE_URL is not a first-party Anthropic host — which the router
+// never is — and then every builtin and MCP schema rides on every request:
+// on a session with 165 MCP tools that measured 186K of tool schemas inside
+// a 200K frame, over the limit before the first user turn.
+//
+// The deferral is the client's own work, not the API's: it answers its own
+// ToolSearch call with tool_reference blocks and adds the bound tool's real
+// schema to the next request's tools array. So the router only has to carry
+// those blocks through, which passthrough does natively and translation
+// renders as text (see anthropic.ContentBlock.FlatText).
+//
+// An explicit value in the caller's environment wins, so a shell can still
+// say "false" to get the old eager behavior, or "auto:N" to sample it.
+func enableToolSearch(env []string) []string {
+	if hasEnv(env, "ENABLE_TOOL_SEARCH") {
+		return env
+	}
+	return setEnv(env, "ENABLE_TOOL_SEARCH", "true")
+}
+
 func setEnv(env []string, key, value string) []string {
 	return append(unsetEnv(env, key), key+"="+value)
+}
+
+func hasEnv(env []string, key string) bool {
+	prefix := key + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func unsetEnv(env []string, key string) []string {

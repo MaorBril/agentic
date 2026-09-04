@@ -189,9 +189,10 @@ Details, the cost trade-off, and research methodology: [docs/context-scaling.md]
 
 ## Token utilization
 
-Two more things keep a session from spending window on nothing:
+Three more things keep a session from spending window on nothing:
 
 - **Estimator calibration.** Token counts for translated models are a character heuristic, deliberately biased high. The router measures that guess against what upstream actually billed (per model, from its own usage log) and corrects it, so an over-count stops being subtracted from every context budget it checks. `agentic context` prints the measured accuracy; a model needs 20 requests before its correction is trusted, and corrections are clamped so a bad sample can never shrink an estimate into a window it will not fit.
+- **Deferred tool loading.** Claude Code can hold back tool schemas — sending the deferred tools' names up front and a full schema only once the model pulls one in — but it switches that off whenever `ANTHROPIC_BASE_URL` is not a first-party Anthropic host, which the router never is. Sessions were paying every builtin and MCP schema on every request: measured at 186K of tool schemas inside a 200K frame on a session with 165 MCP tools, over the limit before the first turn. Sessions now ask for it back (`ENABLE_TOOL_SEARCH=true`), and an explicit value in your shell still wins — `false` for the old eager behavior, `auto:N` to sample it.
 - **Cache-hit reporting.** `agentic cost` shows what share of each model's input was served from an upstream prefix cache. Prompt caching is the single largest lever on the input bill, and it was previously invisible — worth checking before reaching for anything cleverer.
 
 `agentic context` also breaks down where a session's context goes — system prompt, tool schemas, conversation — since the first two are re-sent in full on every request whatever the turn is about.

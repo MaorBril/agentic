@@ -200,6 +200,44 @@ the average split and the fixed share; a session where tool schemas are
 40% of every request is one where trimming MCP servers buys more than any
 amount of routing cleverness.
 
+## Deferring the tool schemas
+
+Tool schemas turned out to be the whole ballgame. Claude Code can defer
+them — the deferred tools' names go up in a system reminder, the model
+pulls a schema in with `ToolSearch` when it wants one, and only then does
+the full definition ride on the wire — but the client switches that off
+when it does not recognize the endpoint:
+
+```
+[ToolSearch:optimistic] disabled: ANTHROPIC_BASE_URL=http://127.0.0.1:41100
+is not a first-party Anthropic host. Set ENABLE_TOOL_SEARCH=true (or auto /
+auto:N) if your proxy forwards tool_reference blocks.
+```
+
+The router is never a first-party host, so every session fell back to
+eager schemas. On a session with 165 MCP tools that was 47K of builtins
+plus 139K of MCP definitions — 186K of a 200K frame, spent before the
+first user turn, and re-sent on every request after it. The same machine
+running Claude Code directly paid 11K for the same tools.
+
+Sessions now set `ENABLE_TOOL_SEARCH=true`, which costs the router almost
+nothing because the deferral is the *client's* work, not the API's.
+Measured on the wire: the first request carries 12 tools instead of 28,
+the withheld 18 arrive as names, and when the model calls `ToolSearch` the
+client answers its own call with `tool_reference` blocks and then puts the
+bound tool's real schema in the next request's `tools` array. So the
+router has to do exactly one thing: not lose those blocks. Passthrough
+forwards them untouched along with the `advanced-tool-use-2025-11-20` beta
+value; translation, which has no server-side expansion to hand them to,
+renders them as text so the tool result is never empty — an empty
+`role:"tool"` message is something OpenAI-dialect servers reject outright,
+and the schema was already coming on the next request anyway.
+
+Setting the variable yourself wins over the default: `false` restores the
+eager behavior, `auto:N` samples it. Model evaluations are deliberately
+left alone — `agentic eval` inherits whatever the surrounding shell has,
+so a stored run stays comparable to the run beside it.
+
 ## Watching the prefix cache
 
 Prompt caching decides most of the input bill, so `agentic cost` reports

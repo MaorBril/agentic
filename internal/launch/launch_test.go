@@ -117,3 +117,29 @@ func TestBuildChildWithoutInstanceName(t *testing.T) {
 		t.Errorf("no instance name should leave claude to derive one: %v", got)
 	}
 }
+
+// Claude Code disables deferred tool loading whenever ANTHROPIC_BASE_URL is
+// not a first-party Anthropic host, and the router is never one — so every
+// session paid full tool schemas on every request until we asked for it back.
+func TestSessionEnvEnablesToolSearch(t *testing.T) {
+	prof := config.Profile{Model: "auto"}
+	env := sessionEnv(nil, "http://127.0.0.1:41100", "tok", "sess-1", "main", prof, prof.Model, "/tmp/project")
+
+	if got := envVal(env, "ENABLE_TOOL_SEARCH"); got != "true" {
+		t.Errorf("ENABLE_TOOL_SEARCH = %q, want true", got)
+	}
+}
+
+// A value already in the environment is the caller's deliberate choice —
+// "false" to get the old eager behavior back, "auto:N" to sample it — and
+// must survive, including the falsy ones a naive default would overwrite.
+func TestSessionEnvKeepsExplicitToolSearch(t *testing.T) {
+	prof := config.Profile{Model: "auto"}
+	for _, want := range []string{"false", "auto:25", "force", ""} {
+		in := []string{"ENABLE_TOOL_SEARCH=" + want}
+		env := sessionEnv(in, "http://127.0.0.1:41100", "tok", "sess-1", "main", prof, prof.Model, "/tmp/project")
+		if got := envVal(env, "ENABLE_TOOL_SEARCH"); got != want {
+			t.Errorf("ENABLE_TOOL_SEARCH = %q, want %q (caller's setting)", got, want)
+		}
+	}
+}

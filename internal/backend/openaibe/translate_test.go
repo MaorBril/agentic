@@ -330,3 +330,43 @@ func TestAssistantMessageWithManyToolCallsIsSplit(t *testing.T) {
 		t.Errorf("tool_call ids out of order across split: %+v / %+v", msgs[0].ToolCalls[0], msgs[1].ToolCalls[len(msgs[1].ToolCalls)-1])
 	}
 }
+
+// The real wire shape of a ToolSearch turn under deferred tool loading: the
+// client's own tool_result carries nothing but tool_reference blocks. Left
+// unrendered these produce a role:"tool" message with empty content, which
+// OpenAI-dialect servers (vLLM especially) reject.
+func TestToolReferenceResultIsNotEmpty(t *testing.T) {
+	body := `{
+	  "model": "gpt", "max_tokens": 4096,
+	  "tools": [{"name":"ToolSearch","description":"Load deferred tool schemas","input_schema":{"type":"object"}}],
+	  "messages": [
+	    {"role":"user","content":"fetch example.com"},
+	    {"role":"assistant","content":[
+	      {"type":"tool_use","id":"toolu_probe1","name":"ToolSearch","input":{"query":"select:WebFetch"}}
+	    ]},
+	    {"role":"user","content":[
+	      {"type":"tool_result","tool_use_id":"toolu_probe1","content":[{"type":"tool_reference","tool_name":"WebFetch"}]}
+	    ]}
+	  ]
+	}`
+	out, err := TranslateRequest(parseReq(t, body), route("", "none"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tool *openai.ChatMessage
+	for i := range out.Messages {
+		if out.Messages[i].Role == "tool" {
+			tool = &out.Messages[i]
+		}
+	}
+	if tool == nil {
+		t.Fatal("no tool message produced for the ToolSearch result")
+	}
+	content, ok := tool.Content.(string)
+	if !ok || strings.TrimSpace(content) == "" {
+		t.Fatalf("tool message content = %#v, want non-empty text naming the loaded tool", tool.Content)
+	}
+	if !strings.Contains(content, "WebFetch") {
+		t.Errorf("tool message content = %q, want the referenced tool named", content)
+	}
+}
