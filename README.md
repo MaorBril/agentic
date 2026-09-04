@@ -265,6 +265,9 @@ A local verifier reports its verdict through its exit code: `0` passed, `2` "I c
 
 Artifacts include raw Claude output, patches, container logs, official SWE-bench reports, FAIL_TO_PASS/PASS_TO_PASS details, blinded judge mappings, per-candidate usage and route traces, pair results, the resolved dataset metadata/fingerprint, and `summary.json`. Local setup and verifier commands execute on the host, so review third-party local manifests before running them.
 
+The router writes `~/.agentic/router.log`. It is capped at 8 MiB and keeps three older generations (`router.log.1` … `.3`), so the log costs at most 32 MiB on disk. An oversized log left by an earlier version is rotated on the next write rather than truncated.
+
+
 ## Budgets
 
 Daily, weekly, and monthly caps — global and per profile. When a cap is hit, the router refuses the *next* request with a clear message that shows up right in the Claude Code TUI; in-flight responses are never cut. Warnings surface in the statusline (`agentic setup` registers it), which shows live session and daily spend:
