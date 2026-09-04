@@ -220,6 +220,15 @@ type Profile struct {
 	Budget      *Budget `yaml:"budget"`
 	Passthrough bool    `yaml:"passthrough"`
 	TimeoutMS   int     `yaml:"timeout_ms"`
+	// ToolSearch opts a profile out of deferred tool schemas. Deferral is
+	// on by default because that is where it was measured — it took a
+	// 186K-of-200K frame down to 12 schemas — but it asks the model to
+	// notice a withheld-tool announcement and call ToolSearch before using
+	// one. Claude models are trained on that protocol; a model that is not
+	// simply never loads the withheld tools and quietly runs without them,
+	// so a profile pinned to such a model can set `tool_search: false`.
+	// ENABLE_TOOL_SEARCH in the launching shell overrides this either way.
+	ToolSearch *bool `yaml:"tool_search"`
 }
 
 type Budget struct {

@@ -932,6 +932,13 @@ func evalEnv(env []string, o Options, sid, model string) []string {
 	env = setEnv(env, "ANTHROPIC_DEFAULT_SONNET_MODEL", model)
 	env = setEnv(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL", model)
 	env = setEnv(env, "CLAUDE_CODE_SUBAGENT_MODEL", model)
+	// Pinned, not inherited: interactive sessions export
+	// ENABLE_TOOL_SEARCH=true, and every Bash command they run inherits it,
+	// so an eval launched from inside a session would defer tool schemas
+	// while the same command from a plain terminal would not. Whether a run
+	// is comparable to the one stored beside it must not depend on where it
+	// was invoked from. Flip this to "true" deliberately, as a re-baseline.
+	env = setEnv(env, "ENABLE_TOOL_SEARCH", "false")
 	return env
 }
 

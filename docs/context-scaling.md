@@ -233,10 +233,30 @@ renders them as text so the tool result is never empty — an empty
 `role:"tool"` message is something OpenAI-dialect servers reject outright,
 and the schema was already coming on the next request anyway.
 
-Setting the variable yourself wins over the default: `false` restores the
-eager behavior, `auto:N` samples it. Model evaluations are deliberately
-left alone — `agentic eval` inherits whatever the surrounding shell has,
-so a stored run stays comparable to the run beside it.
+What deferral does ask for is a model that plays along: it has to notice
+the withheld-tool announcement and call `ToolSearch` before reaching for
+one of those tools. Claude models are trained on that protocol. A model
+that is not simply never loads them and quietly runs without them — no
+error, just a smaller toolbox — so a profile pinned to such a model can
+set `tool_search: false` and get eager schemas back:
+
+```yaml
+profiles:
+    kimi:
+        model: kimi-k3
+        tool_search: false
+```
+
+Precedence runs most-immediate-first: `ENABLE_TOOL_SEARCH` in the
+launching shell (`false` for eager, `auto:N` to sample), then the
+profile's `tool_search`, then on.
+
+`agentic eval` pins the variable to `false` rather than inheriting it.
+Interactive sessions export `ENABLE_TOOL_SEARCH=true` and every command
+they run inherits it, so an eval launched from inside a session would
+defer while the same command from a plain terminal would not — and
+whether a run is comparable to the one stored beside it must not depend
+on where it was invoked from. Flipping that is a deliberate re-baseline.
 
 ## Watching the prefix cache
 

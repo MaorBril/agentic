@@ -4,6 +4,7 @@ package openaibe
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/maorbril/agentic/internal/anthropic"
 	"github.com/maorbril/agentic/internal/config"
@@ -185,6 +186,15 @@ func translateMessage(msg anthropic.Message) ([]openai.ChatMessage, error) {
 			switch b.Type {
 			case "tool_result":
 				content := b.FlatText()
+				// ChatMessage.Content is `any` with omitempty, so an empty
+				// string drops the key and the tool message arrives with no
+				// content at all — which OpenAI-dialect servers reject. A
+				// tool can legitimately return nothing (a Bash command with
+				// no stdout, an empty content array, block types this
+				// translation does not render), so say that instead.
+				if strings.TrimSpace(content) == "" {
+					content = "(no output)"
+				}
 				if b.IsError {
 					content = "Error: " + content
 				}

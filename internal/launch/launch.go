@@ -183,7 +183,7 @@ func sessionEnv(env []string, baseURL, token, sessionID, profName string, prof c
 	}
 	env = setEnv(env, "AGENTIC_SESSION_ID", sessionID)
 	env = setEnv(env, "AGENTIC_PROFILE", profName)
-	env = enableToolSearch(env)
+	env = enableToolSearch(env, prof)
 	if prof.TimeoutMS > 0 {
 		env = setEnv(env, "API_TIMEOUT_MS", fmt.Sprint(prof.TimeoutMS))
 	}
@@ -264,11 +264,18 @@ func printSummary(dataDir string, cfg *config.Config, sessionID, profile string)
 // those blocks through, which passthrough does natively and translation
 // renders as text (see anthropic.ContentBlock.FlatText).
 //
-// An explicit value in the caller's environment wins, so a shell can still
-// say "false" to get the old eager behavior, or "auto:N" to sample it.
-func enableToolSearch(env []string) []string {
+// Precedence, most immediate first: an explicit value in the caller's
+// environment (so a shell can say "false" for the old eager behavior, or
+// "auto:N" to sample it), then the profile's tool_search, then on. A
+// profile that opts out gets an explicit "false" rather than an unset
+// variable, so the choice does not depend on how the client's own gate
+// happens to treat an unrecognized host.
+func enableToolSearch(env []string, prof config.Profile) []string {
 	if hasEnv(env, "ENABLE_TOOL_SEARCH") {
 		return env
+	}
+	if prof.ToolSearch != nil && !*prof.ToolSearch {
+		return setEnv(env, "ENABLE_TOOL_SEARCH", "false")
 	}
 	return setEnv(env, "ENABLE_TOOL_SEARCH", "true")
 }

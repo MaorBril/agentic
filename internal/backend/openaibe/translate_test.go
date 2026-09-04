@@ -370,3 +370,46 @@ func TestToolReferenceResultIsNotEmpty(t *testing.T) {
 		t.Errorf("tool message content = %q, want the referenced tool named", content)
 	}
 }
+
+// A tool can legitimately produce nothing — a Bash command with no stdout
+// arrives as content:"" — and ChatMessage.Content is `any` with omitempty,
+// so passing that through drops the key and sends a tool message with no
+// content at all. OpenAI-dialect servers reject that.
+func TestEmptyToolResultStillHasContent(t *testing.T) {
+	cases := map[string]string{
+		"empty string":  `""`,
+		"empty array":   `[]`,
+		"unknown block": `[{"type":"future_block_type"}]`,
+	}
+	for name, content := range cases {
+		body := fmt.Sprintf(`{
+		  "model": "gpt", "max_tokens": 4096,
+		  "messages": [
+		    {"role":"user","content":"run it"},
+		    {"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]},
+		    {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":%s}]}
+		  ]
+		}`, content)
+		out, err := TranslateRequest(parseReq(t, body), route("", "none"))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var tool *openai.ChatMessage
+		for i := range out.Messages {
+			if out.Messages[i].Role == "tool" {
+				tool = &out.Messages[i]
+			}
+		}
+		if tool == nil {
+			t.Fatalf("%s: no tool message produced", name)
+		}
+		// Marshal the way the request goes out: omitempty is the whole point.
+		raw, err := json.Marshal(tool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), `"content"`) {
+			t.Errorf("%s: tool message marshalled without a content key: %s", name, raw)
+		}
+	}
+}

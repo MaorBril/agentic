@@ -352,3 +352,30 @@ func TestNormalizeEffortAndSystemMessages(t *testing.T) {
 		t.Error("opus-4-8 keeps the system message")
 	}
 }
+
+// Claude Code sends its betas comma-joined on one line, but ANTHROPIC_CUSTOM_HEADERS
+// (or any intermediary) can produce repeated header lines, and Header.Get would
+// keep only the first. Losing advanced-tool-use-2025-11-20 while the conversation
+// carries tool_reference blocks earns a 400 that persists for the rest of the
+// session, since those blocks stay in history.
+func TestRepeatedAnthropicBetaHeadersAreAllForwarded(t *testing.T) {
+	body := `{"model":"claude-sonnet-5","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+	var gotHeaders http.Header
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"msg_1","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer up.Close()
+
+	call := mkCall(t, body, up.URL, "claude-sonnet-5")
+	call.Header["Anthropic-Beta"] = []string{"claude-code-20250219", "advanced-tool-use-2025-11-20"}
+	New().Messages(context.Background(), call, httptest.NewRecorder())
+
+	got := gotHeaders.Get("anthropic-beta")
+	for _, want := range []string{"claude-code-20250219", "advanced-tool-use-2025-11-20"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("anthropic-beta = %q, missing %s", got, want)
+		}
+	}
+}

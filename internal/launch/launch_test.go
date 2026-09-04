@@ -143,3 +143,29 @@ func TestSessionEnvKeepsExplicitToolSearch(t *testing.T) {
 		}
 	}
 }
+
+// A profile pinned to a model that was never trained on the ToolSearch
+// protocol can opt out; it gets an explicit "false" rather than an unset
+// variable, so the outcome does not depend on how the client's own gate
+// treats an unrecognized host.
+func TestSessionEnvProfileOptsOutOfToolSearch(t *testing.T) {
+	off := false
+	prof := config.Profile{Model: "kimi-k3", ToolSearch: &off}
+	env := sessionEnv(nil, "http://127.0.0.1:41100", "tok", "sess-1", "main", prof, prof.Model, "/tmp/project")
+
+	if got := envVal(env, "ENABLE_TOOL_SEARCH"); got != "false" {
+		t.Errorf("ENABLE_TOOL_SEARCH = %q, want false (profile opted out)", got)
+	}
+}
+
+// The launching shell is the more immediate signal, so it outranks the
+// profile in both directions.
+func TestSessionEnvShellBeatsProfileToolSearch(t *testing.T) {
+	off := false
+	prof := config.Profile{Model: "kimi-k3", ToolSearch: &off}
+	env := sessionEnv([]string{"ENABLE_TOOL_SEARCH=auto:50"}, "http://127.0.0.1:41100", "tok", "sess-1", "main", prof, prof.Model, "/tmp/project")
+
+	if got := envVal(env, "ENABLE_TOOL_SEARCH"); got != "auto:50" {
+		t.Errorf("ENABLE_TOOL_SEARCH = %q, want auto:50 (shell wins over profile)", got)
+	}
+}

@@ -60,8 +60,13 @@ func (b *Backend) forward(ctx context.Context, call *backend.Call, w http.Respon
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", call.Route.Provider.Key())
+	// Join rather than Get: a repeated anthropic-beta line would otherwise
+	// lose every value but the first, and these are load-bearing. Dropping
+	// advanced-tool-use-2025-11-20 while the conversation carries
+	// tool_reference blocks earns a 400 that persists for the rest of the
+	// session, since the blocks stay in history.
 	for _, h := range []string{"anthropic-version", "anthropic-beta"} {
-		if v := call.Header.Get(h); v != "" {
+		if v := strings.Join(call.Header.Values(h), ","); v != "" {
 			req.Header.Set(h, v)
 		}
 	}
